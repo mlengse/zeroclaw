@@ -206,3 +206,56 @@ async fn spawns_fast_shell_echo_and_exits_cleanly() {
     assert!(exited, "expected clean exit; chunks={chunks:?}");
     assert!(chunks.contains("HELLO_PTY"), "missing HELLO_PTY in {chunks:?}");
 }
+
+#[test]
+fn diag_raw_portable_pty_conpty() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+
+    let pty = native_pty_system();
+    let pair = pty
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.arg("/C");
+        c.arg("echo HELLO_RAW_PTY");
+        c
+    };
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = CommandBuilder::new("/bin/sh");
+        c.arg("-c");
+        c.arg("echo HELLO_RAW_PTY");
+        c
+    };
+
+    let mut child = pair.slave.spawn_command(cmd).expect("spawn");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("reader");
+    let writer = pair.master.take_writer().expect("writer");
+
+    let status = child.wait().expect("wait");
+    drop(writer);
+    drop(pair.master);
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    while let Ok(n) = reader.read(&mut tmp) {
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    let text = String::from_utf8_lossy(&buf);
+    eprintln!("RAW STATUS={status:?}, LEN={}, TEXT={text:?}", buf.len());
+    assert!(status.success());
+    assert!(text.contains("HELLO_RAW_PTY"), "got text={text:?}");
+}
