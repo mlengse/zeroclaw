@@ -278,3 +278,31 @@ const fn default_max_spool_bytes() -> u64 {
 const fn default_idle_debounce_secs() -> u64 {
     300
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_config_defaults_and_toml_overrides() {
+        let defaults: HarnessConfig = toml::from_str("").expect("empty toml parses with defaults");
+        assert!(defaults.sulur.enabled);
+        assert_eq!(defaults.sulur.sidecar_mode, SidecarMode::ManagedSidecar);
+        assert_eq!(defaults.sulur.briefing_budget.max_total_chars, 3_500);
+        assert_eq!(defaults.sulur.spool.max_spool_bytes, 64 * 1024 * 1024);
+
+        let custom: HarnessConfig = toml::from_str(
+            r#"
+[sulur]
+enabled = false
+sidecar_mode = "external_only"
+approval_timeout_secs = 120
+"#,
+        )
+        .expect("override toml parses");
+        assert!(!custom.sulur.enabled);
+        assert_eq!(custom.sulur.sidecar_mode, SidecarMode::ExternalOnly);
+        assert_eq!(custom.sulur.approval_timeout_secs, 120);
+        assert_eq!(custom.sulur.default_scope, "shared");
+    }
+}

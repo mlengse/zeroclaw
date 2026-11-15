@@ -540,9 +540,12 @@ impl CompiledAgentProfile {
     }
 
     /// Evaluate compiled rules against an [`AnsiStripRingBuffer`] in descending priority order.
+    ///
+    /// Inspects only lines emitted at or after the buffer's current detection floor so previously
+    /// resolved blocker prompts cannot re-trigger on subsequent output chunks.
     #[must_use]
     pub fn evaluate_buffer(&self, ring: &AnsiStripRingBuffer) -> Option<RuleMatchResult> {
-        let all_lines = ring.lines_snapshot();
+        let all_lines = ring.evaluation_lines();
         if all_lines.is_empty() {
             return None;
         }
@@ -720,9 +723,14 @@ pub struct AnsiStripRingBuffer {
     lines: VecDeque<String>,
     current_line: String,
     stored_bytes: usize,
+    total_lines_evicted: usize,
+    detection_floor_line: usize,
+    floor_line_byte_offset: usize,
     pending_utf8: Vec<u8>,
     state: AnsiParseState,
     pending_cr: bool,
+    csi_buf: String,
+    pending_responses: Vec<Vec<u8>>,
 }
 
 impl AnsiStripRingBuffer {
@@ -752,6 +760,58 @@ impl AnsiStripRingBuffer {
             out.push(self.current_line.as_str());
         }
         out
+    }
+
+    /// Advance the rule-evaluation watermark to the end of text currently buffered.
+    ///
+    /// Keeps [`Self::lines_snapshot`] intact for `tail_excerpt` while preventing already-resolved
+    /// blocker prompts still retained in the 64-line window from re-triggering on trailing output.
+    pub fn advance_detection_floor(&mut self) {
+        self.detection_floor_line = self.total_lines_evicted + self.lines.len();
+        self.floor_line_byte_offset = self.current_line.len();
+    }
+
+    /// Snapshot of stripped lines produced strictly at or after the current detection floor.
+    #[must_use]
+    pub fn evaluation_lines(&self) -> Vec<&str> {
+        let skip = self
+            .detection_floor_line
+            .saturating_sub(self.total_lines_evicted);
+        if skip > self.lines.len() {
+            return Vec::new();
+        }
+        let mut out: Vec<&str> = Vec::with_capacity(self.lines.len().saturating_sub(skip) + 1);
+        for (idx, line) in self.lines.iter().enumerate().skip(skip) {
+            let offset =
+                if idx == skip && self.total_lines_evicted + idx == self.detection_floor_line {
+                    clamp_char_boundary(line, self.floor_line_byte_offset)
+                } else {
+                    0
+                };
+            let slice = &line[offset..];
+            if offset == 0 || !slice.is_empty() {
+                out.push(slice);
+            }
+        }
+        if !self.current_line.is_empty() {
+            let offset = if self.total_lines_evicted + self.lines.len() == self.detection_floor_line
+            {
+                clamp_char_boundary(&self.current_line, self.floor_line_byte_offset)
+            } else {
+                0
+            };
+            let slice = &self.current_line[offset..];
+            if offset == 0 || !slice.is_empty() {
+                out.push(slice);
+            }
+        }
+        out
+    }
+
+    /// Drain any VT Device Status / Device Attribute replies (e.g. `\x1b[1;1R` for `\x1b[6n`
+    /// emitted by Windows ConPTY when `PSEUDOCONSOLE_INHERIT_CURSOR` is active).
+    pub fn take_terminal_responses(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_responses)
     }
 
     /// Feed raw PTY output bytes, incrementally stripping ANSI CSI/OSC/DCS/ESC sequences
@@ -789,6 +849,9 @@ impl AnsiStripRingBuffer {
             self.pending_cr = false;
             if self.state == AnsiParseState::Ground {
                 self.current_line.clear();
+                if self.total_lines_evicted + self.lines.len() == self.detection_floor_line {
+                    self.floor_line_byte_offset = 0;
+                }
             }
         }
 
@@ -823,7 +886,10 @@ impl AnsiStripRingBuffer {
             },
             AnsiParseState::Escape => {
                 self.state = match ch {
-                    '[' => AnsiParseState::Csi,
+                    '[' => {
+                        self.csi_buf.clear();
+                        AnsiParseState::Csi
+                    }
                     ']' => AnsiParseState::Osc,
                     'P' | 'X' | '^' | '_' => AnsiParseState::StringControl,
                     '(' | ')' | '*' | '+' | '-' | '.' | '/' => AnsiParseState::CharsetDesignate,
@@ -836,8 +902,18 @@ impl AnsiStripRingBuffer {
                 None
             }
             AnsiParseState::Csi => {
+                if self.csi_buf.len() < 32 {
+                    self.csi_buf.push(ch);
+                }
                 // Parameter/intermediate bytes are in 0x20..=0x3F; final byte in 0x40..=0x7E.
                 if ('@'..='~').contains(&ch) || ch == '\x1b' {
+                    match self.csi_buf.as_str() {
+                        "6n" | "?6n" => self.pending_responses.push(b"\x1b[1;1R".to_vec()),
+                        "5n" => self.pending_responses.push(b"\x1b[0n".to_vec()),
+                        "c" | "0c" => self.pending_responses.push(b"\x1b[?1;0c".to_vec()),
+                        _ => {}
+                    }
+                    self.csi_buf.clear();
                     self.state = AnsiParseState::Ground;
                 }
                 None
@@ -881,6 +957,9 @@ impl AnsiStripRingBuffer {
             let trim_target = self.current_line.len() - MAX_RING_BYTES;
             let cut = next_char_boundary(&self.current_line, trim_target);
             self.current_line.drain(..cut);
+            if self.total_lines_evicted + self.lines.len() == self.detection_floor_line {
+                self.floor_line_byte_offset = self.floor_line_byte_offset.saturating_sub(cut);
+            }
         }
     }
 
@@ -895,16 +974,34 @@ impl AnsiStripRingBuffer {
         while self.line_count() > MAX_RING_LINES || self.total_bytes() > MAX_RING_BYTES {
             if let Some(oldest) = self.lines.pop_front() {
                 self.stored_bytes = self.stored_bytes.saturating_sub(oldest.len());
+                self.total_lines_evicted = self.total_lines_evicted.saturating_add(1);
+                if self.detection_floor_line < self.total_lines_evicted {
+                    self.detection_floor_line = self.total_lines_evicted;
+                    self.floor_line_byte_offset = 0;
+                }
             } else {
                 // Only `current_line` remains and exceeds `MAX_RING_BYTES`.
                 if self.current_line.len() > MAX_RING_BYTES {
                     let excess = self.current_line.len() - MAX_RING_BYTES;
                     let cut = next_char_boundary(&self.current_line, excess);
                     self.current_line.drain(..cut);
+                    if self.total_lines_evicted + self.lines.len() == self.detection_floor_line {
+                        self.floor_line_byte_offset =
+                            self.floor_line_byte_offset.saturating_sub(cut);
+                    }
                 }
                 break;
             }
         }
+    }
+}
+
+fn clamp_char_boundary(s: &str, idx: usize) -> usize {
+    let clamped = idx.min(s.len());
+    if s.is_char_boundary(clamped) {
+        clamped
+    } else {
+        next_char_boundary(s, clamped)
     }
 }
 
@@ -1268,5 +1365,14 @@ mod tests {
         assert_eq!(msg.state, RawDetectedState::Blocked);
         assert_eq!(msg.event, "permission.asked");
         assert_eq!(msg.ts, Some(1_760_000_000));
+    }
+
+    #[test]
+    fn responds_to_dsr_cursor_position_query() {
+        let mut buf = AnsiStripRingBuffer::new();
+        let delta = buf.push_bytes_delta(b"\x1b[6n\x1b[32mok\x1b[0m\r\n");
+        assert_eq!(delta, "ok\n");
+        assert_eq!(buf.take_terminal_responses(), vec![b"\x1b[1;1R".to_vec()]);
+        assert!(buf.take_terminal_responses().is_empty());
     }
 }

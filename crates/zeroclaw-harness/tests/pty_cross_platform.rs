@@ -207,55 +207,64 @@ async fn spawns_fast_shell_echo_and_exits_cleanly() {
     assert!(chunks.contains("HELLO_PTY"), "missing HELLO_PTY in {chunks:?}");
 }
 
-#[test]
-fn diag_raw_portable_pty_conpty() {
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-    use std::io::Read;
-
-    let pty = native_pty_system();
-    let pair = pty
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("openpty");
-
+#[tokio::test]
+async fn terminates_long_running_pty_session_cleanly() {
+    let registry = CompiledProfileRegistry::load_from_dir(&detection_dir()).expect("load profiles");
+    let agy = registry.resolve("agy").expect("agy").clone();
     #[cfg(windows)]
-    let mut cmd = {
-        let mut c = CommandBuilder::new("cmd.exe");
-        c.arg("/C");
-        c.arg("echo HELLO_RAW_PTY");
-        c
-    };
+    let (program, args) = (
+        "cmd.exe".to_string(),
+        vec![
+            "/D".into(),
+            "/Q".into(),
+            "/C".into(),
+            "ping -n 30 127.0.0.1 >nul".into(),
+        ],
+    );
     #[cfg(unix)]
-    let mut cmd = {
-        let mut c = CommandBuilder::new("/bin/sh");
-        c.arg("-c");
-        c.arg("echo HELLO_RAW_PTY");
-        c
-    };
+    let (program, args) = (
+        "/bin/sh".to_string(),
+        vec!["-c".into(), "sleep 30".into()],
+    );
 
-    let mut child = pair.slave.spawn_command(cmd).expect("spawn");
-    drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader().expect("reader");
-    let writer = pair.master.take_writer().expect("writer");
+    let handle = PtySessionHandle::spawn(PtySpawnConfig {
+        session_id: "pty-term-1".to_string(),
+        channel_recipient: "discord:term".to_string(),
+        sulur_scope: "ws:memory:zeroclaw".to_string(),
+        workspace_path: std::env::temp_dir(),
+        worktree_branch: None,
+        program,
+        args,
+        extra_env: Default::default(),
+        rows: 24,
+        cols: 80,
+        approval_timeout_secs: 60,
+        profile: agy,
+    })
+    .expect("spawn sleeper");
 
-    let status = child.wait().expect("wait");
-    drop(writer);
-    drop(pair.master);
+    let ctrl = handle.control_sender();
+    let mut events = handle.subscribe_events();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    ctrl.send(PtyControlCommand::Terminate)
+        .await
+        .expect("send terminate");
 
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 4096];
-    while let Ok(n) = reader.read(&mut tmp) {
-        if n == 0 {
-            break;
+    let mut exited = false;
+    let deadline = tokio::time::sleep(Duration::from_secs(5));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => panic!("terminate timed out; state={:?}", handle.state_snapshot()),
+            ev = events.recv() => match ev {
+                Ok(PtyEvent::Exited { .. }) => {
+                    exited = true;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                _ => {}
+            }
         }
-        buf.extend_from_slice(&tmp[..n]);
     }
-    let text = String::from_utf8_lossy(&buf);
-    eprintln!("RAW STATUS={status:?}, LEN={}, TEXT={text:?}", buf.len());
-    assert!(status.success());
-    assert!(text.contains("HELLO_RAW_PTY"), "got text={text:?}");
+    assert!(exited, "expected clean termination Exited event");
 }

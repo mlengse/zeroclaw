@@ -267,6 +267,11 @@ impl HarnessStateMachine {
         &self.ring
     }
 
+    /// Drain pending terminal DSR/DA replies needed by ConPTY/Unix VT handshakes.
+    pub fn take_terminal_responses(&mut self) -> Vec<Vec<u8>> {
+        self.ring.take_terminal_responses()
+    }
+
     /// Last timestamp PTY output arrived.
     #[must_use]
     pub const fn last_output_at_ms(&self) -> u64 {
@@ -494,6 +499,7 @@ impl HarnessStateMachine {
         self.active_approval = None;
         self.ipc_blocked = false;
         self.pending_idle = None;
+        self.ring.advance_detection_floor();
 
         let stdin_bytes = if let Some(custom) = custom_response {
             let mut normalized = normalize_pty_stdin(custom);
@@ -870,7 +876,7 @@ async fn run_supervisor(
     let mut master = Some(ctx.master);
     let mut writer = Some(ctx.writer);
     let mut exit_rx = ctx.exit_rx;
-    let mut known_exit_code: Option<i32> = None;
+    let known_exit_code: Option<i32>;
 
     loop {
         tokio::select! {
@@ -892,6 +898,11 @@ async fn run_supervisor(
             chunk = ctx.raw_rx.recv() => match chunk {
                 Some(bytes) => {
                     let events = sm.on_pty_bytes(&bytes, now_epoch_ms());
+                    if let Some(ref w) = writer {
+                        for reply in sm.take_terminal_responses() {
+                            let _ = write_pty_blocking(Arc::clone(w), reply).await;
+                        }
+                    }
                     sync_and_broadcast(&ctx.state, &ctx.event_tx, &sm, events);
                 }
                 None => {

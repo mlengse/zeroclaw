@@ -211,3 +211,43 @@ fn agy_non_ipc_profile_detects_bottom_region_and_caps_excerpt_and_ring() {
         .expect("reject agy succeeds");
     assert_eq!(bytes, b"\x1b");
 }
+
+#[test]
+fn resolved_blocker_in_ring_does_not_retrigger_on_trailing_output_and_rearms_for_new_prompt() {
+    let registry = CompiledProfileRegistry::load_from_dir(&detection_dir()).expect("load profiles");
+    let opencode = registry.resolve("opencode").expect("opencode").clone();
+    let mut sm = HarnessStateMachine::new("sess-retrigger".into(), opencode, 0, 900);
+
+    let ev1 = sm.on_pty_bytes(b"Thinking...\r\n\xE2\x96\xB3 Permission required\r\n", 100);
+    assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
+    assert!(ev1.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })));
+    let prompt_id = sm
+        .active_approval()
+        .expect("active approval")
+        .prompt_id
+        .clone();
+
+    let (stdin_bytes, _) = sm
+        .resolve_approval(&prompt_id, true, None, 200)
+        .expect("resolve first approval");
+    assert_eq!(stdin_bytes, b"y\r");
+    assert_eq!(sm.phase(), HarnessSessionPhase::Thinking);
+
+    // Trailing echo/output still leaves the old `△ Permission required` line inside the 64-line window,
+    // yet must NOT re-trigger AwaitingApproval.
+    let trailing = sm.on_pty_bytes(b"y\r\nAPPROVED_OK\r\n\r\n\r\n", 250);
+    assert_eq!(sm.phase(), HarnessSessionPhase::Thinking);
+    assert!(
+        !trailing.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })),
+        "stale blocker in retained ring must not re-trigger: {trailing:?}"
+    );
+    assert!(
+        sm.buffer().lines_snapshot().iter().any(|l| l.contains("Permission required")),
+        "history snapshot remains preserved for tail_excerpt"
+    );
+
+    // A genuinely new blocker emitted later must still trigger a fresh prompt.
+    let ev2 = sm.on_pty_bytes(b"\xE2\x96\xB3 Permission required: second edit\r\n", 300);
+    assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
+    assert!(ev2.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })));
+}
