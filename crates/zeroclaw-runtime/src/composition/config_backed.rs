@@ -174,7 +174,16 @@ impl MemorySource for ConfigMemory {
         )
         .await
         {
-            tracing::warn!(%err, "herdr-sulur harness on_session_start hook failed");
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(
+                    "harness.lifecycle.session_start",
+                    ::zeroclaw_log::Action::Fail,
+                )
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({ "err": err.to_string() })),
+                "herdr-sulur harness on_session_start hook failed"
+            );
         }
         zeroclaw_memory::create_memory_for_agent(request.config, request.agent_alias, api_key).await
     }
