@@ -461,14 +461,14 @@ impl HarnessStateMachine {
         }
 
         // If any working or blocked rule currently matches, cancel idle confirmation.
-        if let Some(matched) = self.profile.evaluate_buffer(&self.ring) {
-            if matches!(
+        if let Some(matched) = self.profile.evaluate_buffer(&self.ring)
+            && matches!(
                 matched.state,
                 RawDetectedState::Working | RawDetectedState::Blocked
-            ) {
-                self.pending_idle = None;
-                return Vec::new();
-            }
+            )
+        {
+            self.pending_idle = None;
+            return Vec::new();
         }
 
         self.advance_idle_debounce(now_ms)
@@ -764,7 +764,7 @@ impl PtySessionHandle {
             event_tx: event_tx.clone(),
             cancel: cancel.child_token(),
         };
-        tokio::spawn(async move {
+        let _supervisor = ::zeroclaw_spawn::spawn!(async move {
             run_supervisor(supervisor_args, &mut ipc_listener).await;
         });
 
@@ -823,7 +823,19 @@ fn spawn_blocking_reader(
                     }
                 }
                 Err(err) => {
-                    tracing::debug!(%session_id, %err, "pty blocking reader ended");
+                    ::zeroclaw_log::record!(
+                        DEBUG,
+                        ::zeroclaw_log::Event::new(
+                            "harness.pty.read",
+                            ::zeroclaw_log::Action::Fail,
+                        )
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_id": session_id,
+                            "err": err.to_string(),
+                        })),
+                        "pty blocking reader ended"
+                    );
                     break;
                 }
             }
@@ -937,7 +949,19 @@ async fn run_supervisor(
                     if let Some(ref w) = writer {
                         let normalized = normalize_pty_stdin(&raw);
                         if let Err(err) = write_pty_blocking(Arc::clone(w), normalized).await {
-                            tracing::warn!(session_id = %ctx.session_id, %err, "failed writing PTY stdin");
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    "harness.pty.write_stdin",
+                                    ::zeroclaw_log::Action::Fail,
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                .with_attrs(::serde_json::json!({
+                                    "session_id": ctx.session_id,
+                                    "err": err.to_string(),
+                                })),
+                                "failed writing PTY stdin"
+                            );
                         } else {
                             let events = sm.on_input_sent(now_epoch_ms());
                             sync_and_broadcast(&ctx.state, &ctx.event_tx, &sm, events);
@@ -947,15 +971,38 @@ async fn run_supervisor(
                 Some(PtyControlCommand::ResolveApproval { prompt_id, approved, custom_response, .. }) => {
                     match sm.resolve_approval(&prompt_id, approved, custom_response.as_deref(), now_epoch_ms()) {
                         Ok((bytes, events)) => {
-                            if let Some(ref w) = writer {
-                                if let Err(err) = write_pty_blocking(Arc::clone(w), bytes).await {
-                                    tracing::warn!(session_id = %ctx.session_id, %err, "failed writing approval bytes to PTY");
-                                }
+                            if let Some(ref w) = writer
+                                && let Err(err) = write_pty_blocking(Arc::clone(w), bytes).await
+                            {
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        "harness.pty.write_approval",
+                                        ::zeroclaw_log::Action::Fail,
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                    .with_attrs(::serde_json::json!({
+                                        "session_id": ctx.session_id,
+                                        "err": err.to_string(),
+                                    })),
+                                    "failed writing approval bytes to PTY"
+                                );
                             }
                             sync_and_broadcast(&ctx.state, &ctx.event_tx, &sm, events);
                         }
                         Err(err) => {
-                            tracing::debug!(session_id = %ctx.session_id, %err, "ignored duplicate/stale approval");
+                            ::zeroclaw_log::record!(
+                                DEBUG,
+                                ::zeroclaw_log::Event::new(
+                                    "harness.pty.resolve_approval",
+                                    ::zeroclaw_log::Action::Skip,
+                                )
+                                .with_attrs(::serde_json::json!({
+                                    "session_id": ctx.session_id,
+                                    "err": err.to_string(),
+                                })),
+                                "ignored duplicate/stale approval"
+                            );
                         }
                     }
                 }

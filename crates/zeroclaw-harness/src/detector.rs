@@ -534,7 +534,7 @@ impl CompiledAgentProfile {
         }
 
         // Stable sort descending by priority so tie order matches TOML file order.
-        rules.sort_by(|a, b| b.rule.priority.cmp(&a.rule.priority));
+        rules.sort_by_key(|b| std::cmp::Reverse(b.rule.priority));
 
         Ok(Self { profile, rules })
     }
@@ -1140,7 +1140,7 @@ impl HerdrIpcListener {
             })?;
             let endpoint_path = sock_path.to_string_lossy().into_owned();
             let loop_cancel = cancel.clone();
-            tokio::spawn(async move {
+            ::zeroclaw_spawn::spawn!(async move {
                 loop {
                     tokio::select! {
                         () = loop_cancel.cancelled() => break,
@@ -1149,12 +1149,21 @@ impl HerdrIpcListener {
                                 Ok((stream, _)) => {
                                     let tx_conn = tx.clone();
                                     let conn_cancel = loop_cancel.clone();
-                                    tokio::spawn(async move {
+                                    ::zeroclaw_spawn::spawn!(async move {
                                         read_ndjson_stream(stream, tx_conn, conn_cancel).await;
                                     });
                                 }
                                 Err(err) => {
-                                    tracing::debug!(%err, "herdr unix ipc accept error");
+                                    ::zeroclaw_log::record!(
+                                        DEBUG,
+                                        ::zeroclaw_log::Event::new(
+                                            "harness.ipc.accept",
+                                            ::zeroclaw_log::Action::Fail,
+                                        )
+                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                        .with_attrs(::serde_json::json!({ "err": err.to_string() })),
+                                        "herdr unix ipc accept error"
+                                    );
                                     break;
                                 }
                             }
@@ -1185,20 +1194,38 @@ impl HerdrIpcListener {
 
             let endpoint_path = pipe_name.clone();
             let loop_cancel = cancel.clone();
-            tokio::spawn(async move {
+            ::zeroclaw_spawn::spawn!(async move {
                 loop {
                     tokio::select! {
                         () = loop_cancel.cancelled() => break,
                         res = server.connect() => {
                             if let Err(err) = res {
-                                tracing::debug!(%err, "herdr named-pipe connect error");
+                                ::zeroclaw_log::record!(
+                                    DEBUG,
+                                    ::zeroclaw_log::Event::new(
+                                        "harness.ipc.connect",
+                                        ::zeroclaw_log::Action::Fail,
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                    .with_attrs(::serde_json::json!({ "err": err.to_string() })),
+                                    "herdr named-pipe connect error"
+                                );
                                 break;
                             }
                             let connected = server;
                             match ServerOptions::new().create(&pipe_name) {
                                 Ok(next) => server = next,
                                 Err(err) => {
-                                    tracing::debug!(%err, "herdr named-pipe next instance error");
+                                    ::zeroclaw_log::record!(
+                                        DEBUG,
+                                        ::zeroclaw_log::Event::new(
+                                            "harness.ipc.pipe_next",
+                                            ::zeroclaw_log::Action::Fail,
+                                        )
+                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                        .with_attrs(::serde_json::json!({ "err": err.to_string() })),
+                                        "herdr named-pipe next instance error"
+                                    );
                                     let conn_cancel = loop_cancel.clone();
                                     read_ndjson_stream(connected, tx.clone(), conn_cancel).await;
                                     break;
@@ -1206,7 +1233,7 @@ impl HerdrIpcListener {
                             }
                             let tx_conn = tx.clone();
                             let conn_cancel = loop_cancel.clone();
-                            tokio::spawn(async move {
+                            ::zeroclaw_spawn::spawn!(async move {
                                 read_ndjson_stream(connected, tx_conn, conn_cancel).await;
                             });
                         }
@@ -1264,7 +1291,16 @@ async fn read_ndjson_stream<R>(
                             }
                         }
                         Err(err) => {
-                            tracing::warn!(%err, "ignoring malformed IPC frame from child agent");
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    "harness.ipc.parse",
+                                    ::zeroclaw_log::Action::Fail,
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                .with_attrs(::serde_json::json!({ "err": err.to_string() })),
+                                "ignoring malformed IPC frame from child agent"
+                            );
                         }
                     }
                 }
