@@ -166,6 +166,16 @@ impl MemorySource for ConfigMemory {
             .config
             .resolved_model_provider_for_agent(request.agent_alias)
             .and_then(|(_, _, entry)| entry.api_key.as_deref());
+        #[cfg(feature = "herdr-sulur-harness")]
+        if let Err(err) = zeroclaw_harness::HarnessLifecycleHooks::on_session_start(
+            &zeroclaw_harness::HarnessLifecycle::new(request.config.harness.sulur.enabled),
+            request.agent_alias,
+            "session",
+        )
+        .await
+        {
+            tracing::warn!(%err, "herdr-sulur harness on_session_start hook failed");
+        }
         zeroclaw_memory::create_memory_for_agent(request.config, request.agent_alias, api_key).await
     }
 }

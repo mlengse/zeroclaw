@@ -4,6 +4,8 @@
 pub mod v1;
 pub mod v2;
 
+pub use crate::harness::*;
+
 use crate::autonomy::AutonomyLevel;
 use crate::autonomy::DelegationPolicy;
 use crate::domain_matcher::DomainMatcher;
@@ -791,6 +793,10 @@ pub struct Config {
     #[serde(default)]
     #[nested]
     pub escalation: EscalationConfig,
+    /// Isolated Herdr-Sulur harness configuration (`[harness]`).
+    #[serde(default)]
+    #[nested]
+    pub harness: crate::harness::HarnessConfig,
 }
 
 /// Multi-client workspace isolation configuration.
@@ -21836,6 +21842,7 @@ impl Default for Config {
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
+            harness: crate::harness::HarnessConfig::default(),
         }
     }
 }
@@ -35081,6 +35088,7 @@ auto_save = true
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
+            harness: crate::harness::HarnessConfig::default(),
             env_overridden_paths: std::collections::HashSet::new(),
             pre_override_snapshots: std::collections::HashMap::new(),
             onepassword_reference_snapshots: std::collections::HashMap::new(),
@@ -36522,6 +36530,7 @@ default_temperature = 0.7
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
+            harness: crate::harness::HarnessConfig::default(),
             env_overridden_paths: std::collections::HashSet::new(),
             pre_override_snapshots: std::collections::HashMap::new(),
             onepassword_reference_snapshots: std::collections::HashMap::new(),

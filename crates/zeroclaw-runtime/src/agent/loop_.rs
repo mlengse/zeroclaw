@@ -4303,7 +4303,19 @@ async fn process_message_inner(
                 )
             })
             .unwrap_or_default();
-        let context = hw_context;
+        #[allow(unused_mut)]
+        let mut context = hw_context;
+        #[cfg(feature = "herdr-sulur-harness")]
+        let __zc_harness = {
+            use zeroclaw_harness::HarnessLifecycleHooks as _;
+            let h = zeroclaw_harness::HarnessLifecycle::new(config.harness.sulur.enabled);
+            if let Ok(Some(pre)) = h.on_before_turn(agent_alias, session_id.unwrap_or("default"), &effective_message).await {
+                if !pre.is_empty() {
+                    context = format!("{pre}{context}");
+                }
+            }
+            h
+        };
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
             format!("[{now}] {effective_message}")
@@ -4339,7 +4351,7 @@ async fn process_message_inner(
             .as_ref()
             .map(|c| c as &dyn zeroclaw_api::channel::Channel);
 
-        zeroclaw_api::NATIVE_THINKING_OVERRIDE
+        let __zc_turn_result = zeroclaw_api::NATIVE_THINKING_OVERRIDE
             .scope(
                 thinking_params.native_thinking,
                 agent_turn_with_sop_reassembly(
@@ -4406,7 +4418,16 @@ async fn process_message_inner(
                     Some(&bound_capabilities),
                 ),
             )
-            .await
+            .await;
+        #[cfg(feature = "herdr-sulur-harness")]
+        {
+            use zeroclaw_harness::HarnessLifecycleHooks as _;
+            if let Ok(ref output) = __zc_turn_result {
+                let _ = __zc_harness.on_after_turn(agent_alias, session_id.unwrap_or("default"), output).await;
+            }
+            let _ = __zc_harness.on_idle().await;
+        }
+        __zc_turn_result
     };
     __zc_body
         .instrument(__zc_scope_span)

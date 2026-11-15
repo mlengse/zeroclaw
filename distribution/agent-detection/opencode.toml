@@ -1,0 +1,68 @@
+# OpenCode v2 declarative agent detection profile (Herdr v2026.06.10.1 + IPC plugin)
+# Spec reference: specs/040-herdr-sulur-harness/contracts/agent-detection-schema.toml
+
+schema_version = 1
+
+[[profiles]]
+id = "opencode"
+version = "2026.06.10.1"
+min_engine_version = 1
+updated_at = "2026-06-10T00:00:00Z"
+aliases = ["open-code", "herdr:opencode", "opencode-v2"]
+binary_names = ["opencode", "opencode.exe"]
+default_args = []
+startup_grace_ms = 3000
+
+[profiles.env]
+TERM = "xterm-256color"
+COLORTERM = "truecolor"
+
+[profiles.idle_debounce]
+recheck_ms = 100
+confirmations = 3
+cap_ms = 700
+
+[profiles.ipc_plugin]
+env_flag = "HERDR_ENV"
+socket_env_var = "HERDR_SOCKET_PATH"
+pane_id_env_var = "HERDR_PANE_ID"
+
+[profiles.approval_inputs]
+approve_sequence = "y\r"
+reject_sequence = "n\r"
+interrupt_sequence = "\u001b"
+supports_custom_reply = true
+
+[[profiles.rules]]
+id = "permission_required"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["△ Permission required"] },
+  { contains = ["esc dismiss"], any = [{ contains = ["enter confirm"] }, { contains = ["enter submit"] }, { contains = ["enter toggle"] }], all = [{ any = [{ contains = ["↑↓ select"] }, { contains = ["⇆ tab"] }] }] },
+]
+
+[[profiles.rules]]
+id = "interrupt_hint_working"
+state = "working"
+subphase = "thinking"
+priority = 110
+region = "whole_recent"
+visible_working = true
+any = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["ctrl+c to interrupt"] },
+  { contains = ["press esc to interrupt"] },
+  { line_regex = ['(?i).*opencode.*esc (again to )?interrupt'] },
+]
+
+[[profiles.rules]]
+id = "progress_bar_working"
+state = "working"
+subphase = "streaming"
+priority = 100
+region = "whole_recent"
+visible_working = true
+regex = ['(■|⬝){4,}']

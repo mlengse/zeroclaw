@@ -22,6 +22,7 @@ zeroclaw-providers.workspace = true
 zeroclaw-memory.workspace = true
 zeroclaw-tools.workspace = true
 zeroclaw-sop-graph.workspace = true
+zeroclaw-harness = { workspace = true, optional = true }
 zeroclaw-plugins = { workspace = true, optional = true }
 zeroclaw-tool-call-parser.workspace = true
 fluent = "0.16"
@@ -143,6 +144,7 @@ tool-claude-code-runner = ["zeroclaw-tools/tool-claude-code-runner"]
 tool-codex-cli = ["zeroclaw-tools/tool-codex-cli"]
 tool-gemini-cli = ["zeroclaw-tools/tool-gemini-cli"]
 tool-opencode-cli = ["zeroclaw-tools/tool-opencode-cli"]
+herdr-sulur-harness = ["dep:zeroclaw-harness", "zeroclaw-harness/herdr-sulur-harness"]
 sandbox-bubblewrap = []
 # Exposes test-only helpers (including `ScopedToolRegistry::from_raw_for_test`
 # and the deterministic Agent clock seam) to OTHER crates' test builds (e.g.
