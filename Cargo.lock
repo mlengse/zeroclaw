@@ -14311,6 +14311,7 @@ dependencies = [
 name = "zeroclaw-harness"
 version = "0.9.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "hex",
