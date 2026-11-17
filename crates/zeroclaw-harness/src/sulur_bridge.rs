@@ -575,39 +575,113 @@ impl SulurBridge {
         }
     }
 
-    /// Execute a raw wire operation with active sidecar token injection.
+    /// Execute a raw wire operation with active sidecar token injection and bounded
+    /// transient transport retry on socket/timeout disconnects.
     ///
     /// # Errors
     /// Propagates [`HarnessError::DaemonUnavailable`] or [`HarnessError::Wire`] on failure or `success == false`.
     pub async fn call_op(&self, mut req: WireRequest) -> HarnessResult<WireResponse> {
-        let desc = self.ensure_daemon().await?;
-        req.client_name = Some(self.client_name.clone());
-        req.token = Some(desc.token.clone());
+        const MAX_TRANSIENT_ATTEMPTS: usize = 2;
+        let mut last_err = None;
+        for attempt in 0..MAX_TRANSIENT_ATTEMPTS {
+            let desc = self.ensure_daemon().await?;
+            req.client_name = Some(self.client_name.clone());
+            req.token = Some(desc.token.clone());
 
-        let resp = send_wire_frame(
-            &desc.host,
-            desc.port,
-            &req,
-            Duration::from_millis(self.config.connect_timeout_ms.max(50)),
-            Duration::from_millis(self.config.request_timeout_ms.max(100)),
-        )
-        .await;
+            let resp = send_wire_frame(
+                &desc.host,
+                desc.port,
+                &req,
+                Duration::from_millis(self.config.connect_timeout_ms.max(50)),
+                Duration::from_millis(self.config.request_timeout_ms.max(100)),
+            )
+            .await;
 
-        match resp {
-            Ok(r) if r.success => Ok(r),
-            Ok(r) => Err(HarnessError::Wire {
-                reason: r
-                    .error_message
-                    .unwrap_or_else(|| "sulur-server returned success=false".to_string()),
-            }),
-            Err(err) => {
-                // Invalidate cached descriptor if transport failed so next call re-discovers.
-                if matches!(err, HarnessError::DaemonUnavailable { .. }) {
-                    *self.sidecar.write().await = None;
+            match resp {
+                Ok(r) if r.success => return Ok(r),
+                Ok(r) => {
+                    return Err(HarnessError::Wire {
+                        reason: r
+                            .error_message
+                            .unwrap_or_else(|| "sulur-server returned success=false".to_string()),
+                    });
                 }
-                Err(err)
+                Err(err) => {
+                    let transient = matches!(err, HarnessError::DaemonUnavailable { .. });
+                    if transient {
+                        *self.sidecar.write().await = None;
+                    }
+                    last_err = Some(err);
+                    if !transient || attempt + 1 >= MAX_TRANSIENT_ATTEMPTS {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
         }
+        Err(last_err.unwrap_or_else(|| HarnessError::DaemonUnavailable {
+            reason: "wire call failed".to_string(),
+        }))
+    }
+
+    /// Persist a batch of sanitized memory items in bounded chunks (`32` items per frame)
+    /// over `"remember_batch"`, falling back to `.spool.jsonl` if wire transport fails.
+    ///
+    /// # Errors
+    /// Propagates [`HarnessError::Wire`] / [`HarnessError::Io`] only if both wire and spool fail.
+    pub async fn remember_batch_chunked(
+        &self,
+        items: &[Value],
+        scope: &str,
+        session_id: &str,
+    ) -> HarnessResult<Vec<(i64, bool)>> {
+        const CHUNK_SIZE: usize = 32;
+        let mut out = Vec::with_capacity(items.len());
+        for chunk in items.chunks(CHUNK_SIZE) {
+            let mut scrubbed_items = Vec::with_capacity(chunk.len());
+            for item in chunk {
+                scrubbed_items.push(self.scrub_json_value(item).await);
+            }
+            let mut params = Map::new();
+            params.insert("items".to_string(), Value::Array(scrubbed_items.clone()));
+            match self
+                .call_op(WireRequest {
+                    op: Some("remember_batch".to_string()),
+                    params: Some(params),
+                    ..WireRequest::default()
+                })
+                .await
+            {
+                Ok(resp) => {
+                    for row in resp.rows {
+                        let id = row.first().and_then(|c| c.as_ref()).and_then(Value::as_i64).unwrap_or(0);
+                        let newly = row
+                            .get(1)
+                            .and_then(|c| c.as_ref())
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        out.push((id, newly));
+                    }
+                }
+                Err(_) => {
+                    for item in scrubbed_items {
+                        let seq = self
+                            .turn_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let rec = LifecycleSpoolRecord::new(
+                            session_id,
+                            scope,
+                            "PostTurnSummary",
+                            seq,
+                            now_epoch_ms(),
+                            item,
+                        );
+                        self.append_spool(rec).await?;
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Sanitize & redact a string using any currently loaded daemon token + compiled secret rules.

@@ -332,3 +332,42 @@ impl ChannelSource for NoOutboundChannels {
             .map(|factory| Arc::from(factory()))
     }
 }
+
+#[cfg(all(test, feature = "herdr-sulur-harness"))]
+mod harness_tests {
+    use super::*;
+    use zeroclaw_config::harness::SidecarMode;
+
+    #[test]
+    fn shared_sulur_lifecycle_manager_reuses_same_arc_per_db_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = zeroclaw_config::harness::SulurHarnessConfig::default();
+        cfg.db_path = tmp.path().to_path_buf();
+        cfg.enabled = true;
+
+        let m1 = shared_sulur_lifecycle_manager(&cfg);
+        let m2 = shared_sulur_lifecycle_manager(&cfg);
+        assert!(Arc::ptr_eq(&m1, &m2));
+    }
+
+    #[tokio::test]
+    async fn config_memory_falls_back_gracefully_when_sulur_sidecar_offline() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mut config = Config::default();
+        config.workspace_dir = tmp.path().to_path_buf();
+        config.data_dir = tmp.path().join("data");
+        config.memory.backend = "none".to_string();
+        config.harness.sulur.enabled = true;
+        config.harness.sulur.sidecar_mode = SidecarMode::ExternalOnly;
+        config.harness.sulur.db_path = tmp.path().join("missing-sulur-db");
+
+        let mem = ConfigMemory
+            .memory(&MemoryRequest {
+                config: &config,
+                agent_alias: "default",
+            })
+            .await
+            .expect("offline sidecar must fall back gracefully");
+        assert_ne!(mem.name(), "sulur-wire");
+    }
+}

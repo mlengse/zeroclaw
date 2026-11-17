@@ -280,6 +280,27 @@ fn build_mock_response(req: &WireRequest, cas_conflict_on_patch: bool) -> WireRe
             results: None,
             explanation: None,
         },
+        Some("remember_batch") => {
+            let count = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let rows = (0..count)
+                .map(|idx| vec![Some(json!(200_i64 + idx as i64)), Some(json!(true))])
+                .collect();
+            WireResponse {
+                success: true,
+                message: None,
+                error_message: None,
+                column_names: vec!["id".into(), "newly_stored".into()],
+                rows,
+                stats: None,
+                results: None,
+                explanation: None,
+            }
+        }
         Some("patch") => {
             if cas_conflict_on_patch {
                 WireResponse {
@@ -595,5 +616,87 @@ async fn sulur_wire_memory_and_idle_dream_gate_behave_deterministically() {
     assert!(ops.contains(&"dream_control".to_string()));
     assert!(ops.contains(&"wiki_sync".to_string()));
 
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn sulur_bridge_recall_serializes_recall_channel_flags_and_on_idle_triggers_dream() {
+    use zeroclaw_harness::{HarnessLifecycle, HarnessLifecycleHooks};
+
+    let tmp = TempDir::new().expect("tempdir");
+    let (_port, recorded, shutdown) = spawn_mock_sulur_server(tmp.path(), false).await;
+
+    let mut cfg = test_config(tmp.path(), SidecarMode::ExternalOnly);
+    cfg.recall_channels.late_interaction = true;
+    cfg.recall_channels.graph_proximity = false;
+    cfg.dream_trigger.idle_debounce_secs = 0;
+
+    let lifecycle = HarnessLifecycle::from_config(&cfg);
+    assert!(lifecycle.is_enabled());
+
+    lifecycle
+        .on_session_start("ws:memory:zeroclaw", "sess-hook-1")
+        .await
+        .expect("on_session_start succeeds");
+    let injected = lifecycle
+        .on_before_turn_with_workspace(
+            "ws:memory:zeroclaw",
+            "sess-hook-1",
+            tmp.path(),
+            "check recall channels",
+        )
+        .await
+        .expect("on_before_turn_with_workspace succeeds")
+        .expect("memory context injected");
+    assert!(injected.contains("[Memory context]"));
+
+    lifecycle
+        .on_after_turn("ws:memory:zeroclaw", "sess-hook-1", "turn complete")
+        .await
+        .expect("on_after_turn succeeds");
+    lifecycle.on_idle().await.expect("on_idle succeeds");
+
+    // Verify chunked remember_batch (> 32 items) splits into 2 frames (32 + 8).
+    let items: Vec<Value> = (0..40)
+        .map(|i| json!({ "content": format!("chunked item {i}"), "scope": "ws:memory:zeroclaw" }))
+        .collect();
+    let mgr = lifecycle.manager().expect("manager present");
+    let batch_res = mgr
+        .bridge()
+        .remember_batch_chunked(&items, "ws:memory:zeroclaw", "sess-hook-1")
+        .await
+        .expect("chunked batch succeeds");
+    assert_eq!(batch_res.len(), 40);
+
+    let reqs = recorded.lock().await;
+    let recall_req = reqs
+        .iter()
+        .find(|r| r.op.as_deref() == Some("recall"))
+        .expect("recall request recorded");
+    let channels = recall_req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("channels"))
+        .and_then(Value::as_object)
+        .expect("params.channels object serialized");
+    assert_eq!(channels.get("lexical").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        channels.get("graph_proximity").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        channels.get("late_interaction").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(reqs.iter().any(|r| r.op.as_deref() == Some("dream_control")));
+    assert!(reqs.iter().any(|r| r.op.as_deref() == Some("wiki_sync")));
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| r.op.as_deref() == Some("remember_batch"))
+            .count(),
+        2
+    );
+
+    drop(reqs);
     let _ = shutdown.send(());
 }

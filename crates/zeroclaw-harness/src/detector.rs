@@ -260,7 +260,9 @@ const fn default_true() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RawDetectedState {
+    #[serde(alias = "waiting_for_input", alias = "awaiting_approval")]
     Blocked,
+    #[serde(alias = "running")]
     Working,
     Idle,
 }
@@ -1079,8 +1081,9 @@ fn decode_valid_utf8_prefix(buf: &mut Vec<u8>) -> String {
     out
 }
 
-/// Structured IPC state push payload emitted by OpenCode v2 `HerdrAgentStatePlugin`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Structured IPC state push payload emitted by OpenCode v2 `HerdrAgentStatePlugin`
+/// or ZeroClaw's internal flat IPC state messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IpcStateMessage {
     pub pane_id: String,
     pub state: RawDetectedState,
@@ -1089,10 +1092,117 @@ pub struct IpcStateMessage {
     pub ts: Option<u64>,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum DualFormatIpcFrame {
+    HerdrJsonRpc(HerdrJsonRpcFrame),
+    Flat(FlatIpcStateFrame),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HerdrJsonRpcFrame {
+    method: String,
+    params: HerdrJsonRpcParams,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HerdrJsonRpcParams {
+    pane_id: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    agent_session_id: Option<String>,
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FlatIpcStateFrame {
+    pane_id: String,
+    state: RawDetectedState,
+    event: String,
+    #[serde(default)]
+    ts: Option<u64>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    agent_session_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for IpcStateMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let frame = DualFormatIpcFrame::deserialize(deserializer)?;
+        match frame {
+            DualFormatIpcFrame::HerdrJsonRpc(rpc) => {
+                Self::from_json_rpc(rpc).map_err(serde::de::Error::custom)
+            }
+            DualFormatIpcFrame::Flat(flat) => Ok(Self {
+                pane_id: flat.pane_id,
+                state: flat.state,
+                event: flat.event,
+                ts: flat.ts,
+                detail: flat.detail,
+                agent_session_id: flat.agent_session_id,
+            }),
+        }
+    }
 }
 
 impl IpcStateMessage {
-    /// Parse a single newline-delimited JSON status frame from `HerdrAgentStatePlugin`.
+    fn from_json_rpc(rpc: HerdrJsonRpcFrame) -> Result<Self, String> {
+        let params = rpc.params;
+        match rpc.method.as_str() {
+            "pane.report_agent" => {
+                let (state, event) = match params.state.as_deref() {
+                    Some(raw) => (
+                        parse_herdr_state_str(raw)?,
+                        "pane.report_agent".to_string(),
+                    ),
+                    None if params.agent_session_id.is_some() => (
+                        RawDetectedState::Idle,
+                        "pane.report_agent_session".to_string(),
+                    ),
+                    None => {
+                        return Err(
+                            "pane.report_agent requires `params.state` or `params.agent_session_id`"
+                                .to_string(),
+                        );
+                    }
+                };
+                Ok(Self {
+                    pane_id: params.pane_id,
+                    state,
+                    event,
+                    ts: params.seq,
+                    detail: params.detail.or(params.source),
+                    agent_session_id: params.agent_session_id,
+                })
+            }
+            "pane.report_agent_session" => Ok(Self {
+                pane_id: params.pane_id,
+                state: RawDetectedState::Idle,
+                event: "pane.report_agent_session".to_string(),
+                ts: params.seq,
+                detail: params.detail.or(params.source),
+                agent_session_id: params.agent_session_id,
+            }),
+            other => Err(format!("unsupported Herdr JSON-RPC method `{other}`")),
+        }
+    }
+
+    /// Parse a single newline-delimited JSON status frame from `HerdrAgentStatePlugin`
+    /// or ZeroClaw internal flat state payloads.
     ///
     /// # Errors
     /// Returns [`HarnessError::InvalidProfile`] when JSON syntax or required fields are malformed.
@@ -1101,6 +1211,55 @@ impl IpcStateMessage {
             profile: "ipc:herdr_plugin".to_string(),
             reason: format!("invalid IPC state payload: {err}"),
         })
+    }
+}
+
+fn parse_herdr_state_str(raw: &str) -> Result<RawDetectedState, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "working" | "running" => Ok(RawDetectedState::Working),
+        "blocked" | "waiting_for_input" | "awaiting_approval" => Ok(RawDetectedState::Blocked),
+        "idle" => Ok(RawDetectedState::Idle),
+        other => Err(format!("unknown Herdr IPC state `{other}`")),
+    }
+}
+
+/// Normalize a Windows Named Pipe path so repeated `\\.\pipe\` prefixes are collapsed to a single
+/// `\\.\pipe\` prefix for direct pipe opening.
+#[must_use]
+pub fn normalize_windows_pipe_path(raw: &str) -> String {
+    let mut trimmed = raw.trim();
+    loop {
+        if let Some(rest) = trimmed.strip_prefix(r"\\.\pipe\") {
+            trimmed = rest;
+        } else if let Some(rest) = trimmed.strip_prefix(r"\\.\PIPE\") {
+            trimmed = rest;
+        } else {
+            break;
+        }
+    }
+    let bare = trimmed.trim_start_matches('\\');
+    if bare.is_empty() {
+        String::new()
+    } else {
+        format!(r"\\.\pipe\{bare}")
+    }
+}
+
+/// Format `HERDR_SOCKET_PATH` exported to child processes so Windows Herdr JS plugins that prepend
+/// `\\.\pipe\` never duplicate the prefix, while direct-path readers remain compatible.
+#[must_use]
+pub fn normalize_herdr_socket_env(endpoint_path: &str) -> String {
+    #[cfg(windows)]
+    {
+        let normalized = normalize_windows_pipe_path(endpoint_path);
+        normalized
+            .strip_prefix(r"\\.\pipe\")
+            .unwrap_or(&normalized)
+            .to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        endpoint_path.trim().to_string()
     }
 }
 
@@ -1279,24 +1438,37 @@ impl Drop for HerdrIpcListener {
     }
 }
 
-async fn read_ndjson_stream<R>(
-    stream: R,
+async fn read_ndjson_stream<S>(
+    stream: S,
     tx: mpsc::Sender<IpcStateMessage>,
     cancel: CancellationToken,
 ) where
-    R: tokio::io::AsyncRead + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut reader = BufReader::new(stream).lines();
+    use tokio::io::AsyncWriteExt as _;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half).lines();
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
             line = reader.next_line() => match line {
                 Ok(Some(raw)) if !raw.trim().is_empty() => {
+                    let ack_id = serde_json::from_str::<serde_json::Value>(raw.trim())
+                        .ok()
+                        .and_then(|v| v.get("id").cloned());
                     match IpcStateMessage::parse_ndjson_line(&raw) {
                         Ok(msg) => {
                             if tx.send(msg).await.is_err() {
                                 break;
                             }
+                            let ack = match ack_id {
+                                Some(id) => serde_json::json!({ "id": id, "ok": true }),
+                                None => serde_json::json!({ "ok": true }),
+                            };
+                            let mut ack_line = serde_json::to_vec(&ack).unwrap_or_default();
+                            ack_line.push(b'\n');
+                            let _ = write_half.write_all(&ack_line).await;
+                            let _ = write_half.flush().await;
                         }
                         Err(err) => {
                             ::zeroclaw_log::record!(

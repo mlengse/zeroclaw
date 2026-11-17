@@ -384,6 +384,10 @@ impl HarnessStateMachine {
         if matches!(self.phase, HarnessSessionPhase::Terminated { .. }) {
             return Vec::new();
         }
+        // Session registration/selection frames carry `agent_session_id` metadata without a state transition.
+        if msg.event == "pane.report_agent_session" {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         match msg.state {
             RawDetectedState::Blocked => {
@@ -705,7 +709,10 @@ impl PtySessionHandle {
         if let (Some(ipc_cfg), Some(endpoint)) = (&config.profile.profile.ipc_plugin, &ipc_endpoint)
         {
             cmd.env(&ipc_cfg.env_flag, "1");
-            cmd.env(&ipc_cfg.socket_env_var, endpoint);
+            cmd.env(
+                &ipc_cfg.socket_env_var,
+                crate::detector::normalize_herdr_socket_env(endpoint),
+            );
             cmd.env(&ipc_cfg.pane_id_env_var, &config.session_id);
         }
 

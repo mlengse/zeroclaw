@@ -143,6 +143,7 @@ fn ipc_push_precedes_pty_regex_and_idempotently_resolves_approval() {
         event: "permission.asked".into(),
         ts: Some(500),
         detail: Some("Run `cargo test -p zeroclaw-harness`?".into()),
+        agent_session_id: None,
     };
     let events = sm.on_ipc_message(&ipc, 500);
     assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
@@ -435,4 +436,57 @@ async fn live_herdr_ipc_listener_drives_opencode_state_machine() {
     sm.on_ipc_message(&msg_idle, 3_500);
     assert_eq!(sm.phase(), HarnessSessionPhase::CompletedIdle);
     cancel.cancel();
+}
+
+#[test]
+fn parses_herdr_json_rpc_report_agent_and_session_envelopes() {
+    use zeroclaw_harness::detector::{normalize_herdr_socket_env, normalize_windows_pipe_path};
+
+    // Windows Named Pipe normalization prevents \\.\pipe\\\.\pipe\ duplication.
+    assert_eq!(
+        normalize_windows_pipe_path(r"zeroclaw-herdr-1"),
+        r"\\.\pipe\zeroclaw-herdr-1"
+    );
+    assert_eq!(
+        normalize_windows_pipe_path(r"\\.\pipe\\\.\pipe\zeroclaw-herdr-1"),
+        r"\\.\pipe\zeroclaw-herdr-1"
+    );
+    let env_val = normalize_herdr_socket_env(r"\\.\pipe\zeroclaw-herdr-1");
+    #[cfg(windows)]
+    assert_eq!(env_val, "zeroclaw-herdr-1");
+    #[cfg(not(windows))]
+    assert_eq!(env_val, r"\\.\pipe\zeroclaw-herdr-1");
+
+    // Native Herdr JSON-RPC pane.report_agent (working / blocked / idle + agent_session_id)
+    let working = IpcStateMessage::parse_ndjson_line(
+        r#"{"id":"herdr:opencode:1","method":"pane.report_agent","params":{"pane_id":"pane-42","source":"herdr:opencode","agent":"opencode","seq":101,"state":"working","agent_session_id":"oc-sess-9"}}"#,
+    )
+    .expect("parse working json-rpc");
+    assert_eq!(working.pane_id, "pane-42");
+    assert_eq!(working.state, RawDetectedState::Working);
+    assert_eq!(working.event, "pane.report_agent");
+    assert_eq!(working.agent_session_id.as_deref(), Some("oc-sess-9"));
+
+    let blocked = IpcStateMessage::parse_ndjson_line(
+        r#"{"id":"herdr:opencode:2","method":"pane.report_agent","params":{"pane_id":"pane-42","state":"blocked","agent_session_id":"oc-sess-9"}}"#,
+    )
+    .expect("parse blocked json-rpc");
+    assert_eq!(blocked.state, RawDetectedState::Blocked);
+
+    let session_only = IpcStateMessage::parse_ndjson_line(
+        r#"{"id":"herdr:opencode:3","method":"pane.report_agent_session","params":{"pane_id":"pane-42","agent_session_id":"oc-sess-10"}}"#,
+    )
+    .expect("parse session json-rpc");
+    assert_eq!(session_only.event, "pane.report_agent_session");
+    assert_eq!(session_only.agent_session_id.as_deref(), Some("oc-sess-10"));
+
+    // Mid-turn pane.report_agent_session MUST NOT drop an active session to CompletedIdle.
+    let registry = CompiledProfileRegistry::load_from_dir(&detection_dir()).expect("load profiles");
+    let opencode = registry.resolve("opencode").expect("opencode").clone();
+    let mut sm = HarnessStateMachine::new("pane-42".into(), opencode, 0, 900);
+    sm.on_ipc_message(&working, 100);
+    assert_eq!(sm.phase(), HarnessSessionPhase::Thinking);
+    let sess_ev = sm.on_ipc_message(&session_only, 5_000);
+    assert!(sess_ev.is_empty());
+    assert_eq!(sm.phase(), HarnessSessionPhase::Thinking);
 }
