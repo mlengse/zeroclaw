@@ -30,7 +30,7 @@ use zeroclaw_config::schema::Config;
 
 use crate::tools::AllToolsResult;
 
-mod config_backed;
+pub(crate) mod config_backed;
 #[cfg(all(test, unix))]
 mod supplied_only_traps;
 
