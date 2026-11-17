@@ -4324,10 +4324,9 @@ async fn process_message_inner(
                     &effective_message,
                 )
                 .await
+                && !pre.is_empty()
             {
-                if !pre.is_empty() {
-                    context = format!("{pre}{context}");
-                }
+                context = format!("{pre}{context}");
             }
             Some((mgr, scope.to_string()))
         } else {

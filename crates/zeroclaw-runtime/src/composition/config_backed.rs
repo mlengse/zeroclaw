@@ -354,7 +354,6 @@ mod harness_tests {
     async fn config_memory_falls_back_gracefully_when_sulur_sidecar_offline() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let mut config = Config::default();
-        config.workspace_dir = tmp.path().to_path_buf();
         config.data_dir = tmp.path().join("data");
         config.memory.backend = "none".to_string();
         config.harness.sulur.enabled = true;
@@ -369,5 +368,76 @@ mod harness_tests {
             .await
             .expect("offline sidecar must fall back gracefully");
         assert_ne!(mem.name(), "sulur-wire");
+    }
+
+    #[tokio::test]
+    async fn config_memory_returns_sulur_wire_when_sidecar_responds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("sulur.db");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let norm = zeroclaw_harness::sulur_bridge::normalize_db_path(&db_path.to_string_lossy());
+        let sidecar = format!("{norm}.daemon.json");
+        std::fs::write(
+            &sidecar,
+            serde_json::json!({
+                "host": "127.0.0.1",
+                "port": port,
+                "token": "test-tok",
+                "protocol": "akar-json-v1",
+                "pid": 1
+            })
+            .to_string(),
+        )
+        .expect("write sidecar");
+
+        let server_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut len_buf = [0_u8; 4];
+                    if stream.read_exact(&mut len_buf).await.is_err() {
+                        return;
+                    }
+                    let len = u32::from_le_bytes(len_buf) as usize;
+                    let mut buf = vec![0_u8; len];
+                    if stream.read_exact(&mut buf).await.is_err() {
+                        return;
+                    }
+                    let req: serde_json::Value = serde_json::from_slice(&buf).unwrap_or_default();
+                    let resp = match req.get("op").and_then(serde_json::Value::as_str) {
+                        Some("ping") => serde_json::json!({ "success": true, "message": "pong" }),
+                        _ => serde_json::json!({ "success": true, "rows": [] }),
+                    };
+                    let body = serde_json::to_vec(&resp).expect("serialize");
+                    let out_len = (body.len() as u32).to_le_bytes();
+                    let _ = stream.write_all(&out_len).await;
+                    let _ = stream.write_all(&body).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+
+        let mut config = Config::default();
+        config.data_dir = tmp.path().join("data");
+        config.memory.backend = "none".to_string();
+        config.harness.sulur.enabled = true;
+        config.harness.sulur.sidecar_mode = SidecarMode::ExternalOnly;
+        config.harness.sulur.db_path = db_path;
+
+        let mem = ConfigMemory
+            .memory(&MemoryRequest {
+                config: &config,
+                agent_alias: "default",
+            })
+            .await
+            .expect("online sidecar returns SulurWireMemory");
+        assert_eq!(mem.name(), "sulur-wire");
+        server_task.abort();
     }
 }
