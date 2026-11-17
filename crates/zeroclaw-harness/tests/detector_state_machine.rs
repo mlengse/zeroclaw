@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use zeroclaw_api::lifecycle::LifecycleActivity;
+use zeroclaw_harness::HarnessError;
 use zeroclaw_harness::detector::{
     CompiledProfileRegistry, IpcStateMessage, MAX_EXCERPT_CHARS, MAX_RING_BYTES, MAX_RING_LINES,
     RawDetectedState,
@@ -10,7 +11,6 @@ use zeroclaw_harness::detector::{
 use zeroclaw_harness::pty_runner::{
     DetectionSourceKind, HarnessSessionPhase, HarnessStateMachine, PtyEvent,
 };
-use zeroclaw_harness::HarnessError;
 
 fn detection_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -82,7 +82,10 @@ fn suppresses_false_idle_until_debounce_and_startup_grace_elapse() {
     }
 
     // Past startup grace (t = 3_100): re-arm working hint then let it disappear cleanly.
-    sm.on_pty_bytes(b"progress: \xE2\x96\xA0\xE2\x96\xA0\xE2\x96\xA0\xE2\x96\xA0\r\n", 3_100);
+    sm.on_pty_bytes(
+        b"progress: \xE2\x96\xA0\xE2\x96\xA0\xE2\x96\xA0\xE2\x96\xA0\r\n",
+        3_100,
+    );
     assert_eq!(sm.phase(), HarnessSessionPhase::Streaming);
 
     // Flush the 64 lines so no working rule matches anymore.
@@ -144,10 +147,17 @@ fn ipc_push_precedes_pty_regex_and_idempotently_resolves_approval() {
     let events = sm.on_ipc_message(&ipc, 500);
     assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
 
-    let payload = sm.active_approval().expect("active approval populated").clone();
+    let payload = sm
+        .active_approval()
+        .expect("active approval populated")
+        .clone();
     assert_eq!(payload.source, DetectionSourceKind::IpcPush);
     assert_eq!(payload.rule_id, "ipc:permission.asked");
-    assert!(events.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PtyEvent::ApprovalRequested { .. }))
+    );
 
     // First approval resolution sends OpenCode approve_sequence "y\r"
     let (bytes, res_events) = sm
@@ -167,7 +177,10 @@ fn ipc_push_precedes_pty_regex_and_idempotently_resolves_approval() {
 
     // Duplicate resolution with same prompt_id fails idempotently
     let dup = sm.resolve_approval(&payload.prompt_id, true, None, 650);
-    assert!(matches!(dup, Err(HarnessError::ApprovalAlreadyProcessed { .. })));
+    assert!(matches!(
+        dup,
+        Err(HarnessError::ApprovalAlreadyProcessed { .. })
+    ));
 }
 
 #[test]
@@ -220,7 +233,10 @@ fn resolved_blocker_in_ring_does_not_retrigger_on_trailing_output_and_rearms_for
 
     let ev1 = sm.on_pty_bytes(b"Thinking...\r\n\xE2\x96\xB3 Permission required\r\n", 100);
     assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
-    assert!(ev1.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })));
+    assert!(
+        ev1.iter()
+            .any(|e| matches!(e, PtyEvent::ApprovalRequested { .. }))
+    );
     let prompt_id = sm
         .active_approval()
         .expect("active approval")
@@ -238,16 +254,185 @@ fn resolved_blocker_in_ring_does_not_retrigger_on_trailing_output_and_rearms_for
     let trailing = sm.on_pty_bytes(b"y\r\nAPPROVED_OK\r\n\r\n\r\n", 250);
     assert_eq!(sm.phase(), HarnessSessionPhase::Thinking);
     assert!(
-        !trailing.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })),
+        !trailing
+            .iter()
+            .any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })),
         "stale blocker in retained ring must not re-trigger: {trailing:?}"
     );
     assert!(
-        sm.buffer().lines_snapshot().iter().any(|l| l.contains("Permission required")),
+        sm.buffer()
+            .lines_snapshot()
+            .iter()
+            .any(|l| l.contains("Permission required")),
         "history snapshot remains preserved for tail_excerpt"
     );
 
     // A genuinely new blocker emitted later must still trigger a fresh prompt.
     let ev2 = sm.on_pty_bytes(b"\xE2\x96\xB3 Permission required: second edit\r\n", 300);
     assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
-    assert!(ev2.iter().any(|e| matches!(e, PtyEvent::ApprovalRequested { .. })));
+    assert!(
+        ev2.iter()
+            .any(|e| matches!(e, PtyEvent::ApprovalRequested { .. }))
+    );
+}
+
+#[test]
+fn opencode_and_agy_detection_meets_250ms_latency_budget() {
+    let registry = CompiledProfileRegistry::load_from_dir(&detection_dir()).expect("load profiles");
+    let opencode = registry.resolve("opencode").expect("opencode").clone();
+    let agy = registry.resolve("agy").expect("agy").clone();
+
+    let start = std::time::Instant::now();
+    for i in 0..50_u64 {
+        let mut sm_oc = HarnessStateMachine::new(format!("oc-lat-{i}"), opencode.clone(), 0, 900);
+        sm_oc.on_pty_bytes(b"\x1b[36mThinking... esc to interrupt\x1b[0m\r\n", 100);
+        assert_eq!(sm_oc.phase(), HarnessSessionPhase::Thinking);
+        sm_oc.on_pty_bytes(b"\xE2\x96\xB3 Permission required: git status\r\n", 150);
+        assert_eq!(sm_oc.phase(), HarnessSessionPhase::AwaitingApproval);
+
+        let mut sm_agy = HarnessStateMachine::new(format!("agy-lat-{i}"), agy.clone(), 0, 900);
+        sm_agy.on_pty_bytes(b"\xE2\xA0\x8B Inspecting cargo workspace\r\n", 100);
+        assert_eq!(sm_agy.phase(), HarnessSessionPhase::Streaming);
+        sm_agy.on_pty_bytes(
+            b"\xE2\x86\x91/\xE2\x86\x93 Navigate \xc2\xb7 tab Amend\r\nesc to cancel\r\n",
+            150,
+        );
+        assert_eq!(sm_agy.phase(), HarnessSessionPhase::AwaitingApproval);
+    }
+    let avg_pair_latency = start.elapsed() / 50;
+    assert!(
+        avg_pair_latency < std::time::Duration::from_millis(250),
+        "state detection exceeded 250ms SLA (SC-002): {avg_pair_latency:?}"
+    );
+}
+
+#[test]
+fn terminated_session_settles_to_completed_idle_for_restart() {
+    let registry = CompiledProfileRegistry::load_from_dir(&detection_dir()).expect("load profiles");
+    let agy = registry.resolve("agy").expect("agy").clone();
+    let mut sm = HarnessStateMachine::new("sess-crash-1".into(), agy, 0, 900);
+
+    sm.on_pty_bytes(b"\xE2\xA0\x8B Building target\r\n", 100);
+    assert_eq!(sm.phase(), HarnessSessionPhase::Streaming);
+
+    let exit_events = sm.on_process_exit(Some(101), 450);
+    assert_eq!(
+        sm.phase(),
+        HarnessSessionPhase::Terminated {
+            exit_code: Some(101)
+        }
+    );
+    assert!(exit_events.iter().any(|e| matches!(
+        e,
+        PtyEvent::Exited {
+            exit_code: Some(101),
+            ..
+        }
+    )));
+
+    // After recording failed-turn diagnostic, harness settles back to CompletedIdle so
+    // one-click Discord restart can inject the next turn cleanly.
+    let settled = sm.settle_completed_idle_after_exit(480);
+    assert_eq!(sm.phase(), HarnessSessionPhase::CompletedIdle);
+    assert_eq!(
+        sm.phase().to_lifecycle_activity(),
+        LifecycleActivity::Finished
+    );
+    assert!(settled.iter().any(|e| matches!(
+        e,
+        PtyEvent::PhaseChanged {
+            from: HarnessSessionPhase::Terminated {
+                exit_code: Some(101)
+            },
+            to: HarnessSessionPhase::CompletedIdle,
+            ..
+        }
+    )));
+
+    let restarted = sm.on_input_sent(500);
+    assert_eq!(sm.phase(), HarnessSessionPhase::Thinking);
+    assert!(restarted.iter().any(|e| matches!(
+        e,
+        PtyEvent::PhaseChanged {
+            from: HarnessSessionPhase::CompletedIdle,
+            to: HarnessSessionPhase::Thinking,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn live_herdr_ipc_listener_drives_opencode_state_machine() {
+    use tokio::io::AsyncWriteExt;
+    use tokio_util::sync::CancellationToken;
+    use zeroclaw_harness::detector::HerdrIpcListener;
+
+    let registry = CompiledProfileRegistry::load_from_dir(&detection_dir()).expect("load profiles");
+    let opencode = registry.resolve("opencode").expect("opencode").clone();
+    let cancel = CancellationToken::new();
+    let mut listener = HerdrIpcListener::bind("ipc-e2e-1", cancel.clone()).expect("bind IPC");
+    let endpoint = listener.endpoint_path().to_string();
+
+    let writer_task = zeroclaw_spawn::spawn!(async move {
+        #[cfg(windows)]
+        let mut client = {
+            use tokio::net::windows::named_pipe::ClientOptions;
+            loop {
+                match ClientOptions::new().open(&endpoint) {
+                    Ok(c) => break c,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                }
+            }
+        };
+        #[cfg(unix)]
+        let mut client = tokio::net::UnixStream::connect(&endpoint)
+            .await
+            .expect("connect unix ipc");
+
+        client
+            .write_all(
+                br#"{"pane_id":"ipc-e2e-1","state":"blocked","event":"permission.asked","detail":"Write file src/lib.rs?"}
+"#,
+            )
+            .await
+            .expect("write blocked ipc");
+        client
+            .write_all(
+                br#"{"pane_id":"ipc-e2e-1","state":"idle","event":"session.idle"}
+"#,
+            )
+            .await
+            .expect("write idle ipc");
+        client.flush().await.expect("flush ipc");
+    });
+
+    let msg_blocked = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        listener.receiver_mut().recv(),
+    )
+    .await
+    .expect("timeout receiving blocked IPC")
+    .expect("blocked IPC message");
+
+    let msg_idle = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        listener.receiver_mut().recv(),
+    )
+    .await
+    .expect("timeout receiving idle IPC")
+    .expect("idle IPC message");
+
+    writer_task.await.expect("writer task");
+
+    let mut sm = HarnessStateMachine::new("ipc-e2e-1".into(), opencode, 0, 900);
+    let ev1 = sm.on_ipc_message(&msg_blocked, 200);
+    assert_eq!(sm.phase(), HarnessSessionPhase::AwaitingApproval);
+    assert!(ev1.iter().any(|e| matches!(
+        e,
+        PtyEvent::ApprovalRequested { payload, .. } if payload.source == DetectionSourceKind::IpcPush
+    )));
+
+    sm.on_ipc_message(&msg_idle, 3_500);
+    assert_eq!(sm.phase(), HarnessSessionPhase::CompletedIdle);
+    cancel.cancel();
 }

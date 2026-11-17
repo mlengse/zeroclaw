@@ -46,10 +46,11 @@ impl AgentDetectionConfig {
     /// # Errors
     /// Returns [`HarnessError::InvalidProfile`] when TOML parsing fails or required fields are missing.
     pub fn from_toml_str(input: &str) -> HarnessResult<Self> {
-        let value: toml::Value = toml::from_str(input).map_err(|err| HarnessError::InvalidProfile {
-            profile: "<toml>".to_string(),
-            reason: err.to_string(),
-        })?;
+        let value: toml::Value =
+            toml::from_str(input).map_err(|err| HarnessError::InvalidProfile {
+                profile: "<toml>".to_string(),
+                reason: err.to_string(),
+            })?;
 
         let Some(table) = value.as_table() else {
             return Err(HarnessError::InvalidProfile {
@@ -64,17 +65,16 @@ impl AgentDetectionConfig {
                 reason: err.to_string(),
             })
         } else if table.contains_key("id") {
-            let single =
-                toml::from_str::<AgentProfileToml>(input).map_err(|err| {
-                    HarnessError::InvalidProfile {
-                        profile: table
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("<single>")
-                            .to_string(),
-                        reason: err.to_string(),
-                    }
-                })?;
+            let single = toml::from_str::<AgentProfileToml>(input).map_err(|err| {
+                HarnessError::InvalidProfile {
+                    profile: table
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<single>")
+                        .to_string(),
+                    reason: err.to_string(),
+                }
+            })?;
             Ok(Self {
                 schema_version: SUPPORTED_SCHEMA_VERSION,
                 profiles: vec![single],
@@ -82,8 +82,9 @@ impl AgentDetectionConfig {
         } else {
             Err(HarnessError::InvalidProfile {
                 profile: "<toml>".to_string(),
-                reason: "expected either `schema_version`/`[[profiles]]` or a top-level profile `id`"
-                    .to_string(),
+                reason:
+                    "expected either `schema_version`/`[[profiles]]` or a top-level profile `id`"
+                        .to_string(),
             })
         }
     }
@@ -581,7 +582,9 @@ impl CompiledAgentProfile {
                         .as_ref()
                         .map(|(t, _)| t.clone())
                         .unwrap_or_else(|| all_lines.join("\n")),
-                    RegionSpec::BottomNonEmptyLines(n) => tail_non_empty_lines(&all_lines, n).join("\n"),
+                    RegionSpec::BottomNonEmptyLines(n) => {
+                        tail_non_empty_lines(&all_lines, n).join("\n")
+                    }
                 };
                 return Some(RuleMatchResult {
                     rule_id: compiled.rule.id.clone(),
@@ -1028,10 +1031,7 @@ pub fn truncate_chars_tail(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
     let skip = char_count - max_chars;
-    let start_byte = text
-        .char_indices()
-        .nth(skip)
-        .map_or(0, |(idx, _)| idx);
+    let start_byte = text.char_indices().nth(skip).map_or(0, |(idx, _)| idx);
     text[start_byte..].to_string()
 }
 
@@ -1122,7 +1122,13 @@ impl HerdrIpcListener {
         let (tx, rx) = mpsc::channel(64);
         let safe_id: String = session_id
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
 
         #[cfg(unix)]
@@ -1132,12 +1138,11 @@ impl HerdrIpcListener {
             if sock_path.exists() {
                 let _ = std::fs::remove_file(&sock_path);
             }
-            let listener = tokio::net::UnixListener::bind(&sock_path).map_err(|source| {
-                HarnessError::Io {
+            let listener =
+                tokio::net::UnixListener::bind(&sock_path).map_err(|source| HarnessError::Io {
                     path: sock_path.clone(),
                     source,
-                }
-            })?;
+                })?;
             let endpoint_path = sock_path.to_string_lossy().into_owned();
             let loop_cancel = cancel.clone();
             ::zeroclaw_spawn::spawn!(async move {
@@ -1183,7 +1188,10 @@ impl HerdrIpcListener {
         #[cfg(windows)]
         {
             use tokio::net::windows::named_pipe::ServerOptions;
-            let pipe_name = format!(r"\\.\pipe\zeroclaw-herdr-{safe_id}-{}", uuid::Uuid::new_v4());
+            let pipe_name = format!(
+                r"\\.\pipe\zeroclaw-herdr-{safe_id}-{}",
+                uuid::Uuid::new_v4()
+            );
             let mut server = ServerOptions::new()
                 .first_pipe_instance(true)
                 .create(&pipe_name)
@@ -1388,14 +1396,17 @@ mod tests {
 
         // Blocker in bottom 2 non-empty lines beats spinner above!
         buf.push_bytes(b"\xE2\x86\x91/\xE2\x86\x93 Navigate \xc2\xb7 tab Amend \xc2\xb7 ctrl+g edit\r\nesc to cancel\r\n");
-        let m2 = profile.evaluate_buffer(&buf).expect("permission_prompt matches");
+        let m2 = profile
+            .evaluate_buffer(&buf)
+            .expect("permission_prompt matches");
         assert_eq!(m2.state, RawDetectedState::Blocked);
         assert_eq!(m2.rule_id, "permission_prompt");
     }
 
     #[test]
     fn parses_herdr_ipc_ndjson_payload() {
-        let raw = r#"{"pane_id":"pane-1","state":"blocked","event":"permission.asked","ts":1760000000}"#;
+        let raw =
+            r#"{"pane_id":"pane-1","state":"blocked","event":"permission.asked","ts":1760000000}"#;
         let msg = IpcStateMessage::parse_ndjson_line(raw).expect("valid ndjson");
         assert_eq!(msg.pane_id, "pane-1");
         assert_eq!(msg.state, RawDetectedState::Blocked);

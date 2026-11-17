@@ -1,10 +1,10 @@
 //! TDD contract & schema tests for declarative Herdr-compatible agent profiles (`T009`).
 
 use std::path::PathBuf;
+use zeroclaw_harness::HarnessError;
 use zeroclaw_harness::detector::{
     AgentDetectionConfig, CompiledProfileRegistry, RawDetectedState, RegionSpec,
 };
-use zeroclaw_harness::HarnessError;
 
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR = <workspace>/zeroclaw/crates/zeroclaw-harness
@@ -64,10 +64,7 @@ fn vendored_profiles_match_schema_contract() {
     assert_eq!(agy.profile.approval_inputs.approve_sequence, "\r");
     assert_eq!(agy.profile.approval_inputs.reject_sequence, "\u{001b}");
     assert_eq!(agy.rules.len(), 6);
-    assert_eq!(
-        agy.rules[0].region,
-        RegionSpec::BottomNonEmptyLines(2)
-    );
+    assert_eq!(agy.rules[0].region, RegionSpec::BottomNonEmptyLines(2));
     assert_eq!(agy.rules[2].region, RegionSpec::BottomNonEmptyLines(8));
     assert_eq!(agy.rules[3].region, RegionSpec::WholeRecent);
     assert_eq!(agy.rules[5].region, RegionSpec::BottomNonEmptyLines(12));
@@ -158,7 +155,11 @@ regex = ['[unclosed(']
 
 #[test]
 fn rejects_out_of_bounds_region_spec() {
-    for invalid in ["bottom_non_empty_lines(0)", "bottom_non_empty_lines(65)", "top_lines(3)"] {
+    for invalid in [
+        "bottom_non_empty_lines(0)",
+        "bottom_non_empty_lines(65)",
+        "top_lines(3)",
+    ] {
         let parsed = RegionSpec::parse(invalid);
         assert!(
             matches!(parsed, Err(HarnessError::InvalidRegionSpec(_))),

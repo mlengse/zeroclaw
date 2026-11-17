@@ -147,7 +147,10 @@ async fn spawns_mock_cli_in_real_pty_and_roundtrips_approval_to_exit() {
 
     assert!(saw_working, "expected Thinking/Streaming transition");
     assert!(saw_approval, "expected ApprovalRequested event");
-    assert!(saw_approved_ok, "expected child to observe injected y\\r and print APPROVED_OK");
+    assert!(
+        saw_approved_ok,
+        "expected child to observe injected y\\r and print APPROVED_OK"
+    );
     assert!(exited_cleanly, "expected clean child exit");
 }
 
@@ -158,12 +161,20 @@ async fn spawns_fast_shell_echo_and_exits_cleanly() {
     #[cfg(windows)]
     let (program, args) = (
         "cmd.exe".to_string(),
-        vec!["/D".into(), "/Q".into(), "/C".into(), "echo esc to interrupt & echo HELLO_PTY".into()],
+        vec![
+            "/D".into(),
+            "/Q".into(),
+            "/C".into(),
+            "echo esc to interrupt & echo HELLO_PTY".into(),
+        ],
     );
     #[cfg(unix)]
     let (program, args) = (
         "/bin/sh".to_string(),
-        vec!["-c".into(), "echo 'esc to interrupt'; echo HELLO_PTY".into()],
+        vec![
+            "-c".into(),
+            "echo 'esc to interrupt'; echo HELLO_PTY".into(),
+        ],
     );
 
     let handle = PtySessionHandle::spawn(PtySpawnConfig {
@@ -204,7 +215,10 @@ async fn spawns_fast_shell_echo_and_exits_cleanly() {
         }
     }
     assert!(exited, "expected clean exit; chunks={chunks:?}");
-    assert!(chunks.contains("HELLO_PTY"), "missing HELLO_PTY in {chunks:?}");
+    assert!(
+        chunks.contains("HELLO_PTY"),
+        "missing HELLO_PTY in {chunks:?}"
+    );
 }
 
 #[tokio::test]
@@ -222,10 +236,7 @@ async fn terminates_long_running_pty_session_cleanly() {
         ],
     );
     #[cfg(unix)]
-    let (program, args) = (
-        "/bin/sh".to_string(),
-        vec!["-c".into(), "sleep 30".into()],
-    );
+    let (program, args) = ("/bin/sh".to_string(), vec!["-c".into(), "sleep 30".into()]);
 
     let handle = PtySessionHandle::spawn(PtySpawnConfig {
         session_id: "pty-term-1".to_string(),

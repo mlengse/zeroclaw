@@ -5,12 +5,12 @@
 //! [`HarnessStateMachine`] with strict `IPC > Regex` precedence and debounce suppression.
 
 use crate::detector::{
-    truncate_chars_tail, AnsiStripRingBuffer, CompiledAgentProfile, HerdrIpcListener,
-    IpcStateMessage, RawDetectedState, MAX_EXCERPT_CHARS,
+    AnsiStripRingBuffer, CompiledAgentProfile, HerdrIpcListener, IpcStateMessage,
+    MAX_EXCERPT_CHARS, RawDetectedState, truncate_chars_tail,
 };
 use crate::{HarnessError, HarnessResult};
 use parking_lot::RwLock;
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -64,7 +64,10 @@ impl HarnessSessionPhase {
     /// True if the session is actively working or awaiting approval (not quiescent).
     #[must_use]
     pub const fn is_active(self) -> bool {
-        matches!(self, Self::Thinking | Self::Streaming | Self::AwaitingApproval)
+        matches!(
+            self,
+            Self::Thinking | Self::Streaming | Self::AwaitingApproval
+        )
     }
 }
 
@@ -393,16 +396,16 @@ impl HarnessStateMachine {
                     .map(|d| truncate_chars_tail(d, MAX_EXCERPT_CHARS))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| {
-                        truncate_chars_tail(&self.ring.lines_snapshot().join("\n"), MAX_EXCERPT_CHARS)
+                        truncate_chars_tail(
+                            &self.ring.lines_snapshot().join("\n"),
+                            MAX_EXCERPT_CHARS,
+                        )
                     });
                 let payload = ApprovalPromptPayload {
                     prompt_id: uuid::Uuid::now_v7().to_string(),
                     rule_id: rule_id.clone(),
                     matched_excerpt: excerpt,
-                    tool_or_command_hint: msg
-                        .detail
-                        .clone()
-                        .unwrap_or_else(|| self.infer_hint()),
+                    tool_or_command_hint: msg.detail.clone().unwrap_or_else(|| self.infer_hint()),
                     source: DetectionSourceKind::IpcPush,
                     detected_at_ms: now_ms,
                     timeout_secs: self.approval_timeout_secs,
@@ -432,7 +435,8 @@ impl HarnessStateMachine {
             RawDetectedState::Idle => {
                 self.ipc_blocked = false;
                 self.active_approval = None;
-                if now_ms.saturating_sub(self.started_at_ms) >= self.profile.profile.startup_grace_ms
+                if now_ms.saturating_sub(self.started_at_ms)
+                    >= self.profile.profile.startup_grace_ms
                 {
                     self.pending_idle = None;
                     events.extend(self.transition(
@@ -553,6 +557,22 @@ impl HarnessStateMachine {
         events
     }
 
+    /// Settle a `Terminated` session back to `CompletedIdle` after recording a failed-turn diagnostic
+    /// so operator restart actions (e.g., Discord one-click Restart) can launch the next turn cleanly.
+    pub fn settle_completed_idle_after_exit(&mut self, now_ms: u64) -> Vec<PtyEvent> {
+        if !matches!(self.phase, HarnessSessionPhase::Terminated { .. }) {
+            return Vec::new();
+        }
+        self.pending_idle = None;
+        self.active_approval = None;
+        self.ipc_blocked = false;
+        self.transition(
+            HarnessSessionPhase::CompletedIdle,
+            "exit_settled_idle",
+            now_ms,
+        )
+    }
+
     fn advance_idle_debounce(&mut self, now_ms: u64) -> Vec<PtyEvent> {
         let cfg = self.profile.profile.idle_debounce;
         let updated = match self.pending_idle {
@@ -580,12 +600,7 @@ impl HarnessStateMachine {
         Vec::new()
     }
 
-    fn transition(
-        &mut self,
-        to: HarnessSessionPhase,
-        reason: &str,
-        now_ms: u64,
-    ) -> Vec<PtyEvent> {
+    fn transition(&mut self, to: HarnessSessionPhase, reason: &str, now_ms: u64) -> Vec<PtyEvent> {
         if self.phase == to {
             return Vec::new();
         }
@@ -651,13 +666,14 @@ impl PtySessionHandle {
 
         // Bind optional Herdr out-of-band IPC listener (`OpenCode v2`) BEFORE child spawn.
         let mut ipc_listener = if config.profile.profile.ipc_plugin.is_some() {
-            Some(HerdrIpcListener::bind(&config.session_id, cancel.child_token())?)
+            Some(HerdrIpcListener::bind(
+                &config.session_id,
+                cancel.child_token(),
+            )?)
         } else {
             None
         };
-        let ipc_endpoint = ipc_listener
-            .as_ref()
-            .map(|l| l.endpoint_path().to_string());
+        let ipc_endpoint = ipc_listener.as_ref().map(|l| l.endpoint_path().to_string());
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -712,13 +728,10 @@ impl PtySessionHandle {
                 session_id: config.session_id.clone(),
                 reason: format!("failed cloning PTY reader: {err}"),
             })?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|err| HarnessError::Pty {
-                session_id: config.session_id.clone(),
-                reason: format!("failed acquiring PTY writer: {err}"),
-            })?;
+        let writer = pair.master.take_writer().map_err(|err| HarnessError::Pty {
+            session_id: config.session_id.clone(),
+            reason: format!("failed acquiring PTY writer: {err}"),
+        })?;
 
         let master = Arc::new(parking_lot::Mutex::new(pair.master));
         let writer = Arc::new(parking_lot::Mutex::new(writer));
@@ -729,7 +742,9 @@ impl PtySessionHandle {
         let initial_state = PtySessionState {
             session_id: config.session_id.clone(),
             channel_recipient: config.channel_recipient,
-            selected_runtime: SelectedAgentRuntime::DeclarativeCli(config.profile.profile.id.clone()),
+            selected_runtime: SelectedAgentRuntime::DeclarativeCli(
+                config.profile.profile.id.clone(),
+            ),
             sulur_scope: config.sulur_scope,
             workspace_path: config.workspace_path,
             worktree_branch: config.worktree_branch,
@@ -872,10 +887,7 @@ struct SupervisorContext {
     cancel: CancellationToken,
 }
 
-async fn run_supervisor(
-    mut ctx: SupervisorContext,
-    ipc_listener: &mut Option<HerdrIpcListener>,
-) {
+async fn run_supervisor(mut ctx: SupervisorContext, ipc_listener: &mut Option<HerdrIpcListener>) {
     let recheck_ms = ctx.profile.profile.idle_debounce.recheck_ms.max(25);
     let mut ticker = tokio::time::interval(Duration::from_millis(recheck_ms));
     let mut sm = HarnessStateMachine::new(

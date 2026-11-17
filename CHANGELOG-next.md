@@ -195,6 +195,7 @@ These issues ship in v0.9.0. None of them weakens a security check; where behavi
 - **Plugins aren't confirmed to run in the notarized macOS desktop app** (#11829).
 
 **Dependencies:**
+- **`portable-pty = "0.9"` (MIT) added for `crates/zeroclaw-harness` behind feature `herdr-sulur-harness`:** Provides cross-platform Windows (`ConPTY`) and Unix/Linux (`openpty`) PTY orchestration without graphical terminal rendering crates (`ghostty-vt`).
 - **The web dashboard's build and test tooling has open advisories:** `brace-expansion`, `vite`, `happy-dom` and `postcss-selector-parser`. None of them is in the shipped dashboard, so they affect only people building or testing the web code. The bumps land after v0.9.0 (#11853).
 - **The bundled SQLite advisory RUSTSEC-2026-0459 is accepted for this release.** It's local, and needs a crafted database and `-wal` pair. The fix needs `rusqlite` 0.41, which `matrix-sdk-sqlite` doesn't allow yet (#12320).
 
