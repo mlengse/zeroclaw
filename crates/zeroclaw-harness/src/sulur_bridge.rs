@@ -657,12 +657,26 @@ impl SulurBridge {
         enhanced: bool,
         explain: bool,
     ) -> HarnessResult<WireResponse> {
+        let flags = &self.config.recall_channels;
         let mut params = Map::new();
         params.insert("limit".to_string(), json!(limit.max(1)));
         params.insert("enhanced".to_string(), json!(enhanced));
         params.insert("explain".to_string(), json!(explain));
         params.insert("include_expired".to_string(), json!(false));
         params.insert("include_superseded".to_string(), json!(false));
+        params.insert(
+            "channels".to_string(),
+            json!({
+                "lexical": flags.lexical,
+                "semantic": flags.semantic,
+                "entity": flags.entity,
+                "temporal": flags.temporal,
+                "graph_proximity": flags.graph_proximity,
+                "late_interaction": flags.late_interaction,
+                "dream_augmented": flags.dream_augmented,
+                "propagation": flags.propagation,
+            }),
+        );
         if let Some(sc) = scope.filter(|s| !s.trim().is_empty()) {
             params.insert("scope".to_string(), json!(sc));
         }

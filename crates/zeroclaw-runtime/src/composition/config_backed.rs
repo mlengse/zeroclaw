@@ -155,8 +155,44 @@ impl ProviderSource for ConfigProviders {
     }
 }
 
+#[cfg(feature = "herdr-sulur-harness")]
+type SharedSulurEntry = (
+    zeroclaw_config::harness::SulurHarnessConfig,
+    Arc<zeroclaw_harness::SulurLifecycleManager>,
+);
+
+#[cfg(feature = "herdr-sulur-harness")]
+static SHARED_SULUR_MANAGERS: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<String, SharedSulurEntry>>,
+> = std::sync::OnceLock::new();
+
+/// Return the shared [`zeroclaw_harness::SulurLifecycleManager`] for the configured Sulur DB path,
+/// initializing or refreshing it when `[harness.sulur]` settings change.
+#[cfg(feature = "herdr-sulur-harness")]
+pub(crate) fn shared_sulur_lifecycle_manager(
+    cfg: &zeroclaw_config::harness::SulurHarnessConfig,
+) -> Arc<zeroclaw_harness::SulurLifecycleManager> {
+    let key =
+        zeroclaw_harness::sulur_bridge::normalize_db_path(&cfg.db_path.to_string_lossy());
+    let map = SHARED_SULUR_MANAGERS
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock();
+    if let Some((existing_cfg, existing_mgr)) = guard.get(&key)
+        && existing_cfg == cfg
+    {
+        return Arc::clone(existing_mgr);
+    }
+    let bridge = Arc::new(zeroclaw_harness::SulurBridge::new(cfg.clone()));
+    let mgr = Arc::new(zeroclaw_harness::SulurLifecycleManager::new(bridge));
+    guard.insert(key, (cfg.clone(), Arc::clone(&mgr)));
+    mgr
+}
+
 /// Opens the agent's memory with the agent provider's credential, which
 /// embedding resolution inherits when `[memory]` names none of its own.
+/// When `[harness.sulur].enabled` is true and the sidecar is reachable,
+/// returns [`zeroclaw_harness::SulurWireMemory`] backed by the shared manager,
+/// falling back gracefully to `zeroclaw_memory::create_memory_for_agent` if offline.
 pub struct ConfigMemory;
 
 #[async_trait]
@@ -167,23 +203,40 @@ impl MemorySource for ConfigMemory {
             .resolved_model_provider_for_agent(request.agent_alias)
             .and_then(|(_, _, entry)| entry.api_key.as_deref());
         #[cfg(feature = "herdr-sulur-harness")]
-        if let Err(err) = zeroclaw_harness::HarnessLifecycleHooks::on_session_start(
-            &zeroclaw_harness::HarnessLifecycle::new(request.config.harness.sulur.enabled),
-            request.agent_alias,
-            "session",
-        )
-        .await
-        {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(
-                    "harness.lifecycle.session_start",
-                    ::zeroclaw_log::Action::Fail,
-                )
-                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                .with_attrs(::serde_json::json!({ "err": err.to_string() })),
-                "herdr-sulur harness on_session_start hook failed"
-            );
+        if request.config.harness.sulur.enabled {
+            let sulur_cfg = &request.config.harness.sulur;
+            let scope = if sulur_cfg.default_scope.trim().is_empty() {
+                request.agent_alias.to_string()
+            } else {
+                sulur_cfg.default_scope.clone()
+            };
+            let manager = shared_sulur_lifecycle_manager(sulur_cfg);
+            match zeroclaw_harness::HarnessLifecycleHooks::on_session_start(
+                manager.as_ref(),
+                &scope,
+                "session",
+            )
+            .await
+            {
+                Ok(()) => {
+                    return Ok(Arc::new(zeroclaw_harness::SulurWireMemory::new(
+                        Arc::clone(manager.bridge()),
+                        scope,
+                    )));
+                }
+                Err(err) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(
+                            "harness.lifecycle.session_start",
+                            ::zeroclaw_log::Action::Fail,
+                        )
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({ "err": err.to_string() })),
+                        "herdr-sulur sidecar unavailable; falling back to local memory backend"
+                    );
+                }
+            }
         }
         zeroclaw_memory::create_memory_for_agent(request.config, request.agent_alias, api_key).await
     }

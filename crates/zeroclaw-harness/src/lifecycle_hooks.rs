@@ -239,19 +239,35 @@ impl Memory for SulurWireMemory {
 #[derive(Debug, Clone)]
 pub struct SulurLifecycleManager {
     bridge: Arc<SulurBridge>,
+    last_activity_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SulurLifecycleManager {
     /// Wrap a [`SulurBridge`] in a [`SulurLifecycleManager`].
     #[must_use]
     pub fn new(bridge: Arc<SulurBridge>) -> Self {
-        Self { bridge }
+        Self {
+            bridge,
+            last_activity_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_epoch_ms())),
+        }
     }
 
     /// Borrow underlying [`SulurBridge`].
     #[must_use]
     pub fn bridge(&self) -> &Arc<SulurBridge> {
         &self.bridge
+    }
+
+    /// Record recent turn/session activity so idle dream debounce resets.
+    pub fn touch_activity(&self) {
+        self.last_activity_ms
+            .store(now_epoch_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Override recorded activity epoch milliseconds (primarily for deterministic idle debounce tests).
+    pub fn set_last_activity_ms_for_test(&self, epoch_ms: u64) {
+        self.last_activity_ms
+            .store(epoch_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Execute deterministic Pre-Turn memory assembly (`T019` + `T020`):
@@ -269,6 +285,7 @@ impl SulurLifecycleManager {
         workspace_path: &Path,
         prompt: &str,
     ) -> HarnessResult<InjectedMemoryContext> {
+        self.touch_activity();
         let cfg = self.bridge.config();
         let budget = &cfg.briefing_budget;
         let recall_flags = &cfg.recall_channels;
@@ -411,6 +428,7 @@ impl SulurLifecycleManager {
         cas_patches: &[CasPatchOperation],
         modified_files: &[String],
     ) -> HarnessResult<()> {
+        self.touch_activity();
         let effective_scope = if scope.trim().is_empty() {
             self.bridge.config().default_scope.as_str()
         } else {
@@ -527,7 +545,20 @@ impl HarnessLifecycleHooks for SulurLifecycleManager {
         prompt: &str,
     ) -> HarnessResult<Option<String>> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let injected = self.inject_context(scope, session_id, &cwd, prompt).await?;
+        self.on_before_turn_with_workspace(scope, session_id, &cwd, prompt)
+            .await
+    }
+
+    async fn on_before_turn_with_workspace(
+        &self,
+        scope: &str,
+        session_id: &str,
+        workspace_path: &Path,
+        prompt: &str,
+    ) -> HarnessResult<Option<String>> {
+        let injected = self
+            .inject_context(scope, session_id, workspace_path, prompt)
+            .await?;
         if injected.formatted_block.is_empty() {
             Ok(None)
         } else {
@@ -546,9 +577,11 @@ impl HarnessLifecycleHooks for SulurLifecycleManager {
     }
 
     async fn on_idle(&self) -> HarnessResult<()> {
-        // Standalone `on_idle` hook without caller session snapshot treats caller idle as eligible
-        // only if configured debounce was already met externally; safe default is no-op until
-        // SessionRegistry calls `maybe_trigger_dream(&idle_durations)`.
+        let last_ms = self
+            .last_activity_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let idle_ms = now_epoch_ms().saturating_sub(last_ms);
+        let _triggered = self.maybe_trigger_dream(&[Some(idle_ms)]).await?;
         Ok(())
     }
 }

@@ -16,8 +16,13 @@ pub mod lifecycle_hooks;
 pub mod pty_runner;
 pub mod sulur_bridge;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
+use zeroclaw_config::harness::SulurHarnessConfig;
+
+pub use lifecycle_hooks::{SulurLifecycleManager, SulurWireMemory};
+pub use sulur_bridge::SulurBridge;
 
 /// Typed domain error enum for `zeroclaw-harness` (Constitution Principle VI).
 #[derive(Debug, Error)]
@@ -85,6 +90,17 @@ pub trait HarnessLifecycleHooks: Send + Sync {
         Ok(None)
     }
 
+    /// Assemble deterministic pre-turn memory context for an explicit active `workspace_path`.
+    async fn on_before_turn_with_workspace(
+        &self,
+        scope: &str,
+        session_id: &str,
+        _workspace_path: &Path,
+        prompt: &str,
+    ) -> HarnessResult<Option<String>> {
+        self.on_before_turn(scope, session_id, prompt).await
+    }
+
     /// Persist post-turn execution summary / patches or fall back to `.spool.jsonl`.
     async fn on_after_turn(
         &self,
@@ -105,13 +121,47 @@ pub trait HarnessLifecycleHooks: Send + Sync {
 #[derive(Debug, Default, Clone)]
 pub struct HarnessLifecycle {
     enabled: bool,
+    manager: Option<Arc<SulurLifecycleManager>>,
 }
 
 impl HarnessLifecycle {
     /// Construct a new [`HarnessLifecycle`] handle from config toggle state.
     #[must_use]
-    pub const fn new(enabled: bool) -> Self {
-        Self { enabled }
+    pub fn new(enabled: bool) -> Self {
+        if enabled {
+            Self::from_config(&SulurHarnessConfig::default())
+        } else {
+            Self {
+                enabled: false,
+                manager: None,
+            }
+        }
+    }
+
+    /// Construct a [`HarnessLifecycle`] bound to an explicit [`SulurHarnessConfig`].
+    #[must_use]
+    pub fn from_config(config: &SulurHarnessConfig) -> Self {
+        if !config.enabled {
+            return Self {
+                enabled: false,
+                manager: None,
+            };
+        }
+        let bridge = Arc::new(SulurBridge::new(config.clone()));
+        let manager = Arc::new(SulurLifecycleManager::new(bridge));
+        Self {
+            enabled: true,
+            manager: Some(manager),
+        }
+    }
+
+    /// Construct a [`HarnessLifecycle`] wrapping a shared [`SulurLifecycleManager`].
+    #[must_use]
+    pub fn with_manager(manager: Arc<SulurLifecycleManager>) -> Self {
+        Self {
+            enabled: true,
+            manager: Some(manager),
+        }
     }
 
     /// Whether the Herdr-Sulur harness is enabled in configuration.
@@ -119,7 +169,67 @@ impl HarnessLifecycle {
     pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
+
+    /// Borrow the underlying [`SulurLifecycleManager`] when enabled.
+    #[must_use]
+    pub fn manager(&self) -> Option<&Arc<SulurLifecycleManager>> {
+        self.manager.as_ref()
+    }
 }
 
 #[async_trait::async_trait]
-impl HarnessLifecycleHooks for HarnessLifecycle {}
+impl HarnessLifecycleHooks for HarnessLifecycle {
+    async fn on_session_start(&self, scope: &str, session_id: &str) -> HarnessResult<()> {
+        match &self.manager {
+            Some(mgr) => mgr.on_session_start(scope, session_id).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn on_before_turn(
+        &self,
+        scope: &str,
+        session_id: &str,
+        prompt: &str,
+    ) -> HarnessResult<Option<String>> {
+        match &self.manager {
+            Some(mgr) => mgr.on_before_turn(scope, session_id, prompt).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn on_before_turn_with_workspace(
+        &self,
+        scope: &str,
+        session_id: &str,
+        workspace_path: &Path,
+        prompt: &str,
+    ) -> HarnessResult<Option<String>> {
+        match &self.manager {
+            Some(mgr) => {
+                mgr.on_before_turn_with_workspace(scope, session_id, workspace_path, prompt)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn on_after_turn(
+        &self,
+        scope: &str,
+        session_id: &str,
+        summary: &str,
+    ) -> HarnessResult<()> {
+        match &self.manager {
+            Some(mgr) => mgr.on_after_turn(scope, session_id, summary).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn on_idle(&self) -> HarnessResult<()> {
+        match &self.manager {
+            Some(mgr) => mgr.on_idle().await,
+            None => Ok(()),
+        }
+    }
+}

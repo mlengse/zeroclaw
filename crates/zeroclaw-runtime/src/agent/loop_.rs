@@ -4306,15 +4306,32 @@ async fn process_message_inner(
         #[allow(unused_mut)]
         let mut context = hw_context;
         #[cfg(feature = "herdr-sulur-harness")]
-        let __zc_harness = {
+        let __zc_sulur_mgr = if config.harness.sulur.enabled {
             use zeroclaw_harness::HarnessLifecycleHooks as _;
-            let h = zeroclaw_harness::HarnessLifecycle::new(config.harness.sulur.enabled);
-            if let Ok(Some(pre)) = h.on_before_turn(agent_alias, session_id.unwrap_or("default"), &effective_message).await {
+            let mgr = crate::composition::config_backed::shared_sulur_lifecycle_manager(
+                &config.harness.sulur,
+            );
+            let scope = if config.harness.sulur.default_scope.trim().is_empty() {
+                agent_alias
+            } else {
+                config.harness.sulur.default_scope.as_str()
+            };
+            if let Ok(Some(pre)) = mgr
+                .on_before_turn_with_workspace(
+                    scope,
+                    session_id.unwrap_or("default"),
+                    &agent_workspace,
+                    &effective_message,
+                )
+                .await
+            {
                 if !pre.is_empty() {
                     context = format!("{pre}{context}");
                 }
             }
-            h
+            Some((mgr, scope.to_string()))
+        } else {
+            None
         };
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
@@ -4420,12 +4437,14 @@ async fn process_message_inner(
             )
             .await;
         #[cfg(feature = "herdr-sulur-harness")]
-        {
+        if let Some((ref mgr, ref scope)) = __zc_sulur_mgr {
             use zeroclaw_harness::HarnessLifecycleHooks as _;
             if let Ok(ref output) = __zc_turn_result {
-                let _ = __zc_harness.on_after_turn(agent_alias, session_id.unwrap_or("default"), output).await;
+                let _ = mgr
+                    .on_after_turn(scope, session_id.unwrap_or("default"), output)
+                    .await;
             }
-            let _ = __zc_harness.on_idle().await;
+            let _ = mgr.on_idle().await;
         }
         __zc_turn_result
     };
