@@ -1438,6 +1438,17 @@ impl Drop for HerdrIpcListener {
     }
 }
 
+async fn write_ndjson_ack<W: tokio::io::AsyncWrite + Unpin>(
+    write_half: &mut W,
+    ack: serde_json::Value,
+) {
+    use tokio::io::AsyncWriteExt as _;
+    let mut ack_line = serde_json::to_vec(&ack).unwrap_or_default();
+    ack_line.push(b'\n');
+    let _ = write_half.write_all(&ack_line).await;
+    let _ = write_half.flush().await;
+}
+
 async fn read_ndjson_stream<S>(
     stream: S,
     tx: mpsc::Sender<IpcStateMessage>,
@@ -1445,7 +1456,6 @@ async fn read_ndjson_stream<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    use tokio::io::AsyncWriteExt as _;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half).lines();
     loop {
@@ -1465,10 +1475,7 @@ async fn read_ndjson_stream<S>(
                                 Some(id) => serde_json::json!({ "id": id, "ok": true }),
                                 None => serde_json::json!({ "ok": true }),
                             };
-                            let mut ack_line = serde_json::to_vec(&ack).unwrap_or_default();
-                            ack_line.push(b'\n');
-                            let _ = write_half.write_all(&ack_line).await;
-                            let _ = write_half.flush().await;
+                            write_ndjson_ack(&mut write_half, ack).await;
                         }
                         Err(err) => {
                             ::zeroclaw_log::record!(
@@ -1481,6 +1488,13 @@ async fn read_ndjson_stream<S>(
                                 .with_attrs(::serde_json::json!({ "err": err.to_string() })),
                                 "ignoring malformed IPC frame from child agent"
                             );
+                            if let Some(id) = ack_id {
+                                write_ndjson_ack(
+                                    &mut write_half,
+                                    serde_json::json!({ "id": id, "ok": false }),
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
