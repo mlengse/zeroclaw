@@ -654,7 +654,11 @@ impl SulurBridge {
             {
                 Ok(resp) => {
                     for row in resp.rows {
-                        let id = row.first().and_then(|c| c.as_ref()).and_then(Value::as_i64).unwrap_or(0);
+                        let id = row
+                            .first()
+                            .and_then(|c| c.as_ref())
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0);
                         let newly = row
                             .get(1)
                             .and_then(|c| c.as_ref())

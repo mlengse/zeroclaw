@@ -172,8 +172,7 @@ static SHARED_SULUR_MANAGERS: std::sync::OnceLock<
 pub(crate) fn shared_sulur_lifecycle_manager(
     cfg: &zeroclaw_config::harness::SulurHarnessConfig,
 ) -> Arc<zeroclaw_harness::SulurLifecycleManager> {
-    let key =
-        zeroclaw_harness::sulur_bridge::normalize_db_path(&cfg.db_path.to_string_lossy());
+    let key = zeroclaw_harness::sulur_bridge::normalize_db_path(&cfg.db_path.to_string_lossy());
     let map = SHARED_SULUR_MANAGERS
         .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock();
@@ -356,6 +355,9 @@ mod harness_tests {
         let mut config = Config::default();
         config.data_dir = tmp.path().join("data");
         config.memory.backend = "none".to_string();
+        let mut agent_cfg = zeroclaw_config::schema::AliasedAgentConfig::default();
+        agent_cfg.memory.backend = zeroclaw_config::multi_agent::MemoryBackendKind::None;
+        config.agents.insert("default".to_string(), agent_cfg);
         config.harness.sulur.enabled = true;
         config.harness.sulur.sidecar_mode = SidecarMode::ExternalOnly;
         config.harness.sulur.db_path = tmp.path().join("missing-sulur-db");
@@ -387,8 +389,10 @@ mod harness_tests {
                 "host": "127.0.0.1",
                 "port": port,
                 "token": "test-tok",
+                "db_path": norm,
                 "protocol": "akar-json-v1",
-                "pid": 1
+                "pid": 1,
+                "started_at": 1.0
             })
             .to_string(),
         )
@@ -434,6 +438,9 @@ mod harness_tests {
         let mut config = Config::default();
         config.data_dir = tmp.path().join("data");
         config.memory.backend = "none".to_string();
+        let mut agent_cfg = zeroclaw_config::schema::AliasedAgentConfig::default();
+        agent_cfg.memory.backend = zeroclaw_config::multi_agent::MemoryBackendKind::None;
+        config.agents.insert("default".to_string(), agent_cfg);
         config.harness.sulur.enabled = true;
         config.harness.sulur.sidecar_mode = SidecarMode::ExternalOnly;
         config.harness.sulur.db_path = db_path;

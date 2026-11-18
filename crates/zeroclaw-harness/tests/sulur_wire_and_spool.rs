@@ -688,7 +688,10 @@ async fn sulur_bridge_recall_serializes_recall_channel_flags_and_on_idle_trigger
         channels.get("late_interaction").and_then(Value::as_bool),
         Some(true)
     );
-    assert!(reqs.iter().any(|r| r.op.as_deref() == Some("dream_control")));
+    assert!(
+        reqs.iter()
+            .any(|r| r.op.as_deref() == Some("dream_control"))
+    );
     assert!(reqs.iter().any(|r| r.op.as_deref() == Some("wiki_sync")));
     assert_eq!(
         reqs.iter()

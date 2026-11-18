@@ -1165,10 +1165,7 @@ impl IpcStateMessage {
         match rpc.method.as_str() {
             "pane.report_agent" => {
                 let (state, event) = match params.state.as_deref() {
-                    Some(raw) => (
-                        parse_herdr_state_str(raw)?,
-                        "pane.report_agent".to_string(),
-                    ),
+                    Some(raw) => (parse_herdr_state_str(raw)?, "pane.report_agent".to_string()),
                     None if params.agent_session_id.is_some() => (
                         RawDetectedState::Idle,
                         "pane.report_agent_session".to_string(),
