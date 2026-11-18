@@ -370,14 +370,14 @@ mod harness_tests {
         assert_ne!(mem.name(), "sulur-wire");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_memory_returns_sulur_wire_when_sidecar_responds() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("sulur.db");
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let _ = listener.set_nonblocking(false);
         let port = listener.local_addr().expect("addr").port();
         let norm = zeroclaw_harness::sulur_bridge::normalize_db_path(&db_path.to_string_lossy());
         let sidecar = format!("{norm}.daemon.json");
@@ -394,19 +394,27 @@ mod harness_tests {
         )
         .expect("write sidecar");
 
-        let server_task = tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag = std::sync::Arc::clone(&stop);
+        let server_thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(mut stream) = stream else {
                     break;
                 };
-                tokio::spawn(async move {
+                if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::spawn(move || {
                     let mut len_buf = [0_u8; 4];
-                    if stream.read_exact(&mut len_buf).await.is_err() {
+                    if stream.read_exact(&mut len_buf).is_err() {
                         return;
                     }
                     let len = u32::from_le_bytes(len_buf) as usize;
                     let mut buf = vec![0_u8; len];
-                    if stream.read_exact(&mut buf).await.is_err() {
+                    if stream.read_exact(&mut buf).is_err() {
                         return;
                     }
                     let req: serde_json::Value = serde_json::from_slice(&buf).unwrap_or_default();
@@ -416,9 +424,9 @@ mod harness_tests {
                     };
                     let body = serde_json::to_vec(&resp).expect("serialize");
                     let out_len = (body.len() as u32).to_le_bytes();
-                    let _ = stream.write_all(&out_len).await;
-                    let _ = stream.write_all(&body).await;
-                    let _ = stream.flush().await;
+                    let _ = stream.write_all(&out_len);
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
                 });
             }
         });
@@ -438,6 +446,9 @@ mod harness_tests {
             .await
             .expect("online sidecar returns SulurWireMemory");
         assert_eq!(mem.name(), "sulur-wire");
-        server_task.abort();
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        let _ = server_thread.join();
     }
 }
