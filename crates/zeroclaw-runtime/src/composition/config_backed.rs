@@ -342,9 +342,11 @@ mod harness_tests {
     #[test]
     fn shared_harness_lifecycle_reuses_same_arc_per_db_path_and_refreshes_on_change() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = zeroclaw_config::harness::SulurHarnessConfig::default();
-        cfg.db_path = tmp.path().to_path_buf();
-        cfg.enabled = true;
+        let cfg = zeroclaw_config::harness::SulurHarnessConfig {
+            db_path: tmp.path().to_path_buf(),
+            enabled: true,
+            ..Default::default()
+        };
 
         let h1 = shared_harness_lifecycle(&cfg);
         let h2 = shared_harness_lifecycle(&cfg);
@@ -362,9 +364,14 @@ mod harness_tests {
     #[tokio::test]
     async fn config_memory_falls_back_gracefully_when_sulur_sidecar_offline() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let mut config = Config::default();
-        config.data_dir = tmp.path().join("data");
-        config.memory.backend = "none".to_string();
+        let mut config = Config {
+            data_dir: tmp.path().join("data"),
+            memory: zeroclaw_config::schema::MemoryConfig {
+                backend: "none".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut agent_cfg = zeroclaw_config::schema::AliasedAgentConfig::default();
         agent_cfg.memory.backend = zeroclaw_config::multi_agent::MemoryBackendKind::None;
         config.agents.insert("default".to_string(), agent_cfg);
@@ -445,9 +452,14 @@ mod harness_tests {
             }
         });
 
-        let mut config = Config::default();
-        config.data_dir = tmp.path().join("data");
-        config.memory.backend = "none".to_string();
+        let mut config = Config {
+            data_dir: tmp.path().join("data"),
+            memory: zeroclaw_config::schema::MemoryConfig {
+                backend: "none".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut agent_cfg = zeroclaw_config::schema::AliasedAgentConfig::default();
         agent_cfg.memory.backend = zeroclaw_config::multi_agent::MemoryBackendKind::None;
         config.agents.insert("default".to_string(), agent_cfg);
