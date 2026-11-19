@@ -240,14 +240,19 @@ mod tests {
 
     #[test]
     fn harness_lifecycle_from_config_constructs_manager_when_enabled() {
-        let mut cfg = SulurHarnessConfig::default();
-        cfg.enabled = false;
-        let disabled = HarnessLifecycle::from_config(&cfg);
+        let disabled_cfg = SulurHarnessConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let disabled = HarnessLifecycle::from_config(&disabled_cfg);
         assert!(!disabled.is_enabled());
         assert!(disabled.manager().is_none());
 
-        cfg.enabled = true;
-        let enabled = HarnessLifecycle::from_config(&cfg);
+        let enabled_cfg = SulurHarnessConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let enabled = HarnessLifecycle::from_config(&enabled_cfg);
         assert!(enabled.is_enabled());
         assert!(enabled.manager().is_some());
     }
