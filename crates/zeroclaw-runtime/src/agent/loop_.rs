@@ -4306,17 +4306,16 @@ async fn process_message_inner(
         #[allow(unused_mut)]
         let mut context = hw_context;
         #[cfg(feature = "herdr-sulur-harness")]
-        let __zc_sulur_mgr = if config.harness.sulur.enabled {
+        let __zc_harness = if config.harness.sulur.enabled {
             use zeroclaw_harness::HarnessLifecycleHooks as _;
-            let mgr = crate::composition::config_backed::shared_sulur_lifecycle_manager(
-                &config.harness.sulur,
-            );
+            let harness =
+                crate::composition::config_backed::shared_harness_lifecycle(&config.harness.sulur);
             let scope = if config.harness.sulur.default_scope.trim().is_empty() {
                 agent_alias
             } else {
                 config.harness.sulur.default_scope.as_str()
             };
-            if let Ok(Some(pre)) = mgr
+            if let Ok(Some(pre)) = harness
                 .on_before_turn_with_workspace(
                     scope,
                     session_id.unwrap_or("default"),
@@ -4328,7 +4327,7 @@ async fn process_message_inner(
             {
                 context = format!("{pre}{context}");
             }
-            Some((mgr, scope.to_string()))
+            Some((harness, scope.to_string()))
         } else {
             None
         };
@@ -4436,14 +4435,14 @@ async fn process_message_inner(
             )
             .await;
         #[cfg(feature = "herdr-sulur-harness")]
-        if let Some((ref mgr, ref scope)) = __zc_sulur_mgr {
+        if let Some((ref harness, ref scope)) = __zc_harness {
             use zeroclaw_harness::HarnessLifecycleHooks as _;
             if let Ok(ref output) = __zc_turn_result {
-                let _ = mgr
+                let _ = harness
                     .on_after_turn(scope, session_id.unwrap_or("default"), output)
                     .await;
             }
-            let _ = mgr.on_idle().await;
+            let _ = harness.on_idle().await;
         }
         __zc_turn_result
     };

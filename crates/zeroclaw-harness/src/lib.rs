@@ -233,3 +233,41 @@ impl HarnessLifecycleHooks for HarnessLifecycle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_lifecycle_from_config_constructs_manager_when_enabled() {
+        let mut cfg = SulurHarnessConfig::default();
+        cfg.enabled = false;
+        let disabled = HarnessLifecycle::from_config(&cfg);
+        assert!(!disabled.is_enabled());
+        assert!(disabled.manager().is_none());
+
+        cfg.enabled = true;
+        let enabled = HarnessLifecycle::from_config(&cfg);
+        assert!(enabled.is_enabled());
+        assert!(enabled.manager().is_some());
+    }
+
+    #[tokio::test]
+    async fn harness_lifecycle_disabled_hooks_are_noop() {
+        let hooks: Arc<dyn HarnessLifecycleHooks> = Arc::new(HarnessLifecycle::new(false));
+        hooks
+            .on_session_start("scope", "sess-1")
+            .await
+            .expect("on_session_start");
+        let pre = hooks
+            .on_before_turn_with_workspace("scope", "sess-1", Path::new("."), "hello")
+            .await
+            .expect("on_before_turn_with_workspace");
+        assert!(pre.is_none());
+        hooks
+            .on_after_turn("scope", "sess-1", "done")
+            .await
+            .expect("on_after_turn");
+        hooks.on_idle().await.expect("on_idle");
+    }
+}

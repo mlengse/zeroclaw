@@ -156,41 +156,41 @@ impl ProviderSource for ConfigProviders {
 }
 
 #[cfg(feature = "herdr-sulur-harness")]
-type SharedSulurEntry = (
+type SharedHarnessLifecycleEntry = (
     zeroclaw_config::harness::SulurHarnessConfig,
-    Arc<zeroclaw_harness::SulurLifecycleManager>,
+    Arc<zeroclaw_harness::HarnessLifecycle>,
 );
 
 #[cfg(feature = "herdr-sulur-harness")]
-static SHARED_SULUR_MANAGERS: std::sync::OnceLock<
-    parking_lot::Mutex<std::collections::HashMap<String, SharedSulurEntry>>,
+static SHARED_HARNESS_LIFECYCLES: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<String, SharedHarnessLifecycleEntry>>,
 > = std::sync::OnceLock::new();
 
-/// Return the shared [`zeroclaw_harness::SulurLifecycleManager`] for the configured Sulur DB path,
+/// Return the shared [`zeroclaw_harness::HarnessLifecycle`] for the configured Sulur DB path,
 /// initializing or refreshing it when `[harness.sulur]` settings change.
+/// This is the primary integration handle per Constitution Principle VII.
 #[cfg(feature = "herdr-sulur-harness")]
-pub(crate) fn shared_sulur_lifecycle_manager(
+pub(crate) fn shared_harness_lifecycle(
     cfg: &zeroclaw_config::harness::SulurHarnessConfig,
-) -> Arc<zeroclaw_harness::SulurLifecycleManager> {
+) -> Arc<zeroclaw_harness::HarnessLifecycle> {
     let key = zeroclaw_harness::sulur_bridge::normalize_db_path(&cfg.db_path.to_string_lossy());
-    let map = SHARED_SULUR_MANAGERS
+    let map = SHARED_HARNESS_LIFECYCLES
         .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock();
-    if let Some((existing_cfg, existing_mgr)) = guard.get(&key)
+    if let Some((existing_cfg, existing_lifecycle)) = guard.get(&key)
         && existing_cfg == cfg
     {
-        return Arc::clone(existing_mgr);
+        return Arc::clone(existing_lifecycle);
     }
-    let bridge = Arc::new(zeroclaw_harness::SulurBridge::new(cfg.clone()));
-    let mgr = Arc::new(zeroclaw_harness::SulurLifecycleManager::new(bridge));
-    guard.insert(key, (cfg.clone(), Arc::clone(&mgr)));
-    mgr
+    let lifecycle = Arc::new(zeroclaw_harness::HarnessLifecycle::from_config(cfg));
+    guard.insert(key, (cfg.clone(), Arc::clone(&lifecycle)));
+    lifecycle
 }
 
 /// Opens the agent's memory with the agent provider's credential, which
 /// embedding resolution inherits when `[memory]` names none of its own.
 /// When `[harness.sulur].enabled` is true and the sidecar is reachable,
-/// returns [`zeroclaw_harness::SulurWireMemory`] backed by the shared manager,
+/// returns [`zeroclaw_harness::SulurWireMemory`] backed by the shared harness lifecycle,
 /// falling back gracefully to `zeroclaw_memory::create_memory_for_agent` if offline.
 pub struct ConfigMemory;
 
@@ -209,19 +209,21 @@ impl MemorySource for ConfigMemory {
             } else {
                 sulur_cfg.default_scope.clone()
             };
-            let manager = shared_sulur_lifecycle_manager(sulur_cfg);
+            let harness = shared_harness_lifecycle(sulur_cfg);
             match zeroclaw_harness::HarnessLifecycleHooks::on_session_start(
-                manager.as_ref(),
+                harness.as_ref(),
                 &scope,
                 "session",
             )
             .await
             {
                 Ok(()) => {
-                    return Ok(Arc::new(zeroclaw_harness::SulurWireMemory::new(
-                        Arc::clone(manager.bridge()),
-                        scope,
-                    )));
+                    if let Some(manager) = harness.manager() {
+                        return Ok(Arc::new(zeroclaw_harness::SulurWireMemory::new(
+                            Arc::clone(manager.bridge()),
+                            scope,
+                        )));
+                    }
                 }
                 Err(err) => {
                     ::zeroclaw_log::record!(
@@ -338,15 +340,23 @@ mod harness_tests {
     use zeroclaw_config::harness::SidecarMode;
 
     #[test]
-    fn shared_sulur_lifecycle_manager_reuses_same_arc_per_db_path() {
+    fn shared_harness_lifecycle_reuses_same_arc_per_db_path_and_refreshes_on_change() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let mut cfg = zeroclaw_config::harness::SulurHarnessConfig::default();
         cfg.db_path = tmp.path().to_path_buf();
         cfg.enabled = true;
 
-        let m1 = shared_sulur_lifecycle_manager(&cfg);
-        let m2 = shared_sulur_lifecycle_manager(&cfg);
-        assert!(Arc::ptr_eq(&m1, &m2));
+        let h1 = shared_harness_lifecycle(&cfg);
+        let h2 = shared_harness_lifecycle(&cfg);
+        assert!(Arc::ptr_eq(&h1, &h2));
+        assert!(h1.is_enabled());
+        assert!(h1.manager().is_some());
+
+        let mut updated = cfg.clone();
+        updated.default_scope = "updated-scope".to_string();
+        let h3 = shared_harness_lifecycle(&updated);
+        assert!(!Arc::ptr_eq(&h1, &h3));
+        assert!(h3.is_enabled());
     }
 
     #[tokio::test]
